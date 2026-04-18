@@ -1,0 +1,19 @@
+{
+    "projectType": "mplabx",
+    "sourceProject": "c:\\Users\\davec\\GIT\\tmc5160-ClickerMZ\\tmc5160-ClickerMZ",
+    "device": "32MZ1024EFH064",
+    "imported": "2026-04-17T22:12:17.451Z",
+    "lastSync": "2026-04-17T22:12:17.451Z",
+    "usesBootloader": true,
+    "toolchain": {
+        "compiler": "XC32",
+        "compilerPath": "C:/Program Files/Microchip/xc32/v5.00/bin",
+        "dfpPath": "C:/Program Files/Microchip/MPLABX/v6.25/packs/Microchip/PIC32MZ-EF_DFP/1.4.168"
+    },
+    "folders": {
+        "mccGenerated": "",
+        "userCode": [
+            "srcs"
+        ]
+    }
+}

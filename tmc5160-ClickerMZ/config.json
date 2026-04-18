@@ -1,0 +1,95 @@
+{
+    "device": "32MZ1024EFH064",
+    "compiler": "XC32",
+    "oscillator": {
+        "selection": "SPLL",
+        "primary": {
+            "type": "EC",
+            "frequency": 24000000
+        },
+        "secondary": {
+            "enabled": false
+        }
+    },
+    "pll": {
+        "inputDiv": 3,
+        "multiplier": 50,
+        "outputDiv": 2,
+        "usbInputDiv": 2,
+        "usbEnabled": false
+    },
+    "clock": {
+        "systemFrequency": 200000000,
+        "peripheralDiv": 1,
+        "switchingEnabled": false,
+        "fcksm": "CSECME",
+        "fsoscen": "OFF",
+        "ieso": "OFF",
+        "osciofnc": "OFF",
+        "peripheralBuses": {
+            "pb1": {
+                "enabled": true,
+                "divider": 1
+            },
+            "pb2": {
+                "enabled": true,
+                "divider": 3
+            },
+            "pb3": {
+                "enabled": true,
+                "divider": 3
+            },
+            "pb4": {
+                "enabled": true,
+                "divider": 1
+            },
+            "pb5": {
+                "enabled": true,
+                "divider": 1
+            },
+            "pb7": {
+                "enabled": true,
+                "divider": 1
+            },
+            "pb8": {
+                "enabled": true,
+                "divider": 0
+            }
+        }
+    },
+    "watchdog": {
+        "enabled": false,
+        "postscaler": "PS1048576",
+        "windis": "OFF",
+        "fwdtwinsz": "WINSZ_25"
+    },
+    "debug": {
+        "enabled": true,
+        "jtagen": "OFF",
+        "icesel": "ICS_PGx2"
+    },
+    "protection": {
+        "codeProtect": false,
+        "writeProtect": false,
+        "pwp": "OFF",
+        "bwp": "OFF"
+    },
+    "build": {
+        "heapSize": 8192,
+        "stackSize": 8192,
+        "optLevel": "1",
+        "buildType": "Release"
+    },
+    "libraries": [],
+    "peripherals": [
+        "coretimer"
+    ],
+    "peripheralConfig": {
+        "coretimer": {
+            "enableInterrupt": true,
+            "periodicInterrupt": true,
+            "periodMs": 100,
+            "stopInDebug": false
+        }
+    }
+}

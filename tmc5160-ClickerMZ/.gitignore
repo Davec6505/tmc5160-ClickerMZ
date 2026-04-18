@@ -1,0 +1,24 @@
+# Build outputs
+tmc5160-ClickerMZ/bins/
+tmc5160-ClickerMZ/objs/
+tmc5160-ClickerMZ/libs/
+tmc5160-ClickerMZ/other/
+
+# MCC generated project (MPLABX/MCC side - regenerate from MCC as needed)
+tmc5160-ClickerMZ-MCC/
+
+# MPLABX IDE files
+nbproject/private/
+*.d
+*.o
+*.su
+build/
+dist/
+*.map
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# VS Code
+.vscode/settings.json
