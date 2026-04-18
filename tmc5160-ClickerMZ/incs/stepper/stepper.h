@@ -3,7 +3,16 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "tmc5160_spi.h"
+#include "stepper_transport.h"  /* TMC5160_Status_t                    */
+#include "stepper_hal.h"        /* Stepper_HAL_t                       */
+
+/* ============================================================
+ * Maximum axes supported by this library instance.
+ * Override at compile time: -DSTEPPER_MAX_AXES=2
+ * ============================================================ */
+#ifndef STEPPER_MAX_AXES
+#define STEPPER_MAX_AXES  4U
+#endif
 
 /* ============================================================
  * Enumerations
@@ -17,9 +26,9 @@ typedef enum {
 
 /* Chopper / current control mode */
 typedef enum {
-    STEPPER_CHOP_STEALTHCHOP  = 0,  /* Silent sine-wave, low speed            */
-    STEPPER_CHOP_SPREADCYCLE  = 1,  /* High-accuracy chopper, high speed      */
-    STEPPER_CHOP_AUTO         = 2,  /* Chip auto-switches on TPWMTHRS/TCOOLTHRS */
+    STEPPER_CHOP_STEALTHCHOP  = 0,  /* Silent sine-wave, low speed               */
+    STEPPER_CHOP_SPREADCYCLE  = 1,  /* High-accuracy chopper, high speed         */
+    STEPPER_CHOP_AUTO         = 2,  /* Chip auto-switches on TPWMTHRS/TCOOLTHRS  */
 } TMC5160_ChopperMode_t;
 
 /* ============================================================
@@ -27,8 +36,7 @@ typedef enum {
  *
  * Maps directly to TMC5160 ramp registers.
  * All values are in raw register units (microsteps and internal
- * time base). Use stepper_calc_vmax() / stepper_calc_amax() to
- * convert from mm/s and mm/s² if needed.
+ * time base). Use stepper_mmps_to_vmax() to convert from mm/s.
  *
  * Two-stage S-curve:  set V1 > 0, A1/D1 != AMAX/DMAX
  * Simple trapezoid:   set V1 = 0  (A1, D1 ignored by chip)
@@ -46,7 +54,7 @@ typedef struct {
 
 /* ============================================================
  * Motor configuration struct
- * Passed once to stepper_init()
+ * Passed once to stepper_init_axis()
  * ============================================================ */
 typedef struct {
     TMC5160_DriveMode_t   drive_mode;
@@ -57,9 +65,9 @@ typedef struct {
     uint8_t               iholddelay;      /* Delay before hold current 0-15    */
     float                 steps_per_mm;    /* Full steps per mm (mechanics)     */
     uint32_t              fclk_hz;         /* TMC5160 clock — 12000000 internal */
-    uint16_t              rsense_mohm;     /* Sense resistor mΩ — 75 for BTT PRO, 110 standard */
-    bool                  invert_dir;      /* Board-level direction invert (GCONF.SHAFT)        */
-    bool                  encoder_enable;  /* Enable TMC5160 ABN encoder interface              */
+    uint16_t              rsense_mohm;     /* Sense resistor mΩ — 75 BTT PRO, 110 standard */
+    bool                  invert_dir;      /* Board-level direction invert (GCONF.SHAFT)   */
+    bool                  encoder_enable;  /* Enable TMC5160 ABN encoder interface         */
 } TMC5160_Config_t;
 
 /* ============================================================
@@ -81,64 +89,81 @@ typedef struct {
 } TMC5160_MotorStatus_t;
 
 /* ============================================================
- * Stall callback — set NULL for polling only
- * Called from stepper_poll() when stall is detected
+ * Callbacks
  * ============================================================ */
+
+/* Stall callback — registered per axis; called from stepper_poll()
+   when StallGuard threshold is exceeded.  Pass NULL to disable.    */
 typedef void (*TMC5160_StallCallback_t)(void);
+
+/* Home-complete callback — passed to stepper_home().
+   axis: the axis index that completed homing.
+   NULL → blocking homing mode.  Non-NULL → non-blocking; caller must
+   pump stepper_poll() from the main loop.                           */
+typedef void (*TMC5160_HomeCallback_t)(uint8_t axis);
 
 /* ============================================================
  * Initialisation & control
+ *
+ * stepper_init_axis() is the primary entry point.
+ * Each axis is independent; up to STEPPER_MAX_AXES may be active.
  * ============================================================ */
-bool    stepper_init(const TMC5160_Config_t *cfg);
-void    stepper_enable(void);
-void    stepper_disable(void);
+bool stepper_init_axis(uint8_t axis, const TMC5160_Config_t *cfg, const Stepper_HAL_t *hal);
+void stepper_enable(uint8_t axis);
+void stepper_disable(uint8_t axis);
 
 /* ============================================================
- * Ramp configuration
+ * Ramp configuration  (TMC5160 ramp mode only)
  * ============================================================ */
-void    stepper_set_ramp(const TMC5160_RampConfig_t *ramp);
+void stepper_set_ramp(uint8_t axis, const TMC5160_RampConfig_t *ramp);
 
 /* ============================================================
- * Motion — RAMP mode
+ * Motion — RAMP mode  (TMC5160 internal ramp generator)
  * ============================================================ */
-void    stepper_move_to(int32_t position);          /* absolute microsteps   */
-void    stepper_move_relative(int32_t delta);       /* relative microsteps   */
-void    stepper_run(uint32_t vmax, bool reverse);   /* velocity mode         */
-void    stepper_stop(void);                         /* decel to stop         */
-void    stepper_set_position_zero(void);            /* zero XACTUAL          */
+void stepper_move_to(uint8_t axis, int32_t position);        /* absolute microsteps */
+void stepper_move_relative(uint8_t axis, int32_t delta);     /* relative microsteps */
+void stepper_run(uint8_t axis, uint32_t vmax, bool reverse); /* velocity mode       */
+void stepper_stop(uint8_t axis);                             /* decel to stop       */
+void stepper_set_position_zero(uint8_t axis);                /* zero XACTUAL        */
 
 /* ============================================================
  * Motion — engineering units (requires steps_per_mm set)
  * ============================================================ */
-void    stepper_move_mm(float mm);
-void    stepper_run_mmps(float mm_per_sec, bool reverse);
-int32_t stepper_pos_to_usteps(float mm);
-float   stepper_usteps_to_mm(int32_t usteps);
-uint32_t stepper_mmps_to_vmax(float mm_per_sec);
+void     stepper_move_mm(uint8_t axis, float mm);
+void     stepper_run_mmps(uint8_t axis, float mm_per_sec, bool reverse);
+int32_t  stepper_pos_to_usteps(uint8_t axis, float mm);
+float    stepper_usteps_to_mm(uint8_t axis, int32_t usteps);
+uint32_t stepper_mmps_to_vmax(uint8_t axis, float mm_per_sec);
 
 /* ============================================================
- * Status & polling
+ * Status & polling  (TMC5160 SPI only — no-op for step/dir drivers)
  * ============================================================ */
-void    stepper_poll(TMC5160_MotorStatus_t *status);
-bool    stepper_is_stalled(void);
-bool    stepper_pos_reached(void);
+void stepper_poll(uint8_t axis, TMC5160_MotorStatus_t *status);
+bool stepper_is_stalled(uint8_t axis);
+bool stepper_pos_reached(uint8_t axis);
 
 /* ============================================================
- * StallGuard / CoolStep
+ * StallGuard / CoolStep  (TMC5160 SPI only)
  * ============================================================ */
-void    stepper_stallguard_config(int8_t threshold, bool filter_en);
-void    stepper_coolstep_config(uint8_t semin, uint8_t semax);
-void    stepper_set_stall_callback(TMC5160_StallCallback_t cb);
+void stepper_stallguard_config(uint8_t axis, int8_t threshold, bool filter_en);
+void stepper_coolstep_config(uint8_t axis, uint8_t semin, uint8_t semax);
+void stepper_set_stall_callback(uint8_t axis, TMC5160_StallCallback_t cb);
 
 /* ============================================================
- * Homing (sensorless via StallGuard)
+ * Homing — sensorless via StallGuard  (TMC5160 SPI only)
+ *
+ * Run stepper_stallguard_config() first to set sensitivity.
+ * on_complete = NULL  → blocking: returns when stall detected + zeroed.
+ * on_complete = fn    → non-blocking: starts motion and returns; fn is
+ *                       called from stepper_poll() when homing completes.
  * ============================================================ */
-void    stepper_home(bool reverse, uint32_t creep_vmax);
+void stepper_home(uint8_t axis, bool reverse, uint32_t creep_vmax,
+                  TMC5160_HomeCallback_t on_complete);
 
 /* ============================================================
  * Raw register access (advanced / debug)
  * ============================================================ */
-void     stepper_write_reg(uint8_t addr, uint32_t data);
-uint32_t stepper_read_reg(uint8_t addr);
+void     stepper_write_reg(uint8_t axis, uint8_t addr, uint32_t data);
+uint32_t stepper_read_reg(uint8_t axis, uint8_t addr);
 
 #endif /* STEPPER_H */

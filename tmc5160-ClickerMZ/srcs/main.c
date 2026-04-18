@@ -26,6 +26,7 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
 #include "definitions.h"
 #include "stepper.h"
 #include "plib_gpio.h"
@@ -35,8 +36,6 @@
 // Section: Main Entry Point
 // *****************************************************************************
 // *****************************************************************************
-
-
 
 /* ---------------------------------------------------------------
  * BTT TMC5160 PRO on ClickerMZ — test harness
@@ -59,8 +58,48 @@ static void debug_print(const char *msg)
 /* Block until the TX ring buffer has fully drained to the hardware */
 static void debug_flush(void)
 {
+    /* Wait for software ring buffer to drain into HW FIFO */
+    while (UART2_WriteCountGet() > 0U) { ; }
+    /* Then wait for HW shift register to finish */
     while (!UART2_TransmitComplete()) { ; }
 }
+
+static void hal_spi_write_read(const uint8_t *tx, uint8_t *rx, uint8_t len)
+    { SPI2_WriteRead((uint8_t *)tx, len, rx, len); }
+static bool hal_spi_is_busy(void)   { return SPI2_IsBusy(); }
+static void hal_cs_assert(void)     { CS_Clear(); }
+static void hal_cs_deassert(void)   { CS_Set(); }
+static void hal_en_assert(void)     { EN_Clear(); }
+static void hal_en_deassert(void)   { EN_Set(); }
+static void hal_step_set(void)      { Step_Set(); }
+static void hal_step_clear(void)    { Step_Clear(); }
+static void hal_dir_set(void)       { Dir_Set(); }
+static void hal_dir_clear(void)     { Dir_Clear(); }
+static void hal_delay_us(uint32_t u){ CORETIMER_DelayUs(u); }
+
+
+//uncomment this if using DRV8825 (no SPI, STEP/DIR only)
+//#define STEPPER_USE_DRV8825
+
+
+#ifndef STEPPER_USE_DRV8825
+static const Stepper_HAL_t hal = {
+    hal_spi_write_read, hal_spi_is_busy,
+    hal_cs_assert, hal_cs_deassert,
+    hal_en_assert, hal_en_deassert,
+    hal_step_set, hal_step_clear,
+    hal_dir_set, hal_dir_clear,
+    hal_delay_us
+};
+#else
+static const Stepper_HAL_t hal = {
+    NULL, NULL, NULL, NULL,        /* spi_write_read, spi_is_busy, cs_assert, cs_deassert */
+    hal_en_assert, hal_en_deassert,
+    hal_step_set, hal_step_clear,
+    hal_dir_set,  hal_dir_clear,
+    hal_delay_us
+};
+#endif
 
 /* Block until at least one RX byte arrives, discard it */
 static void wait_for_keypress(void)
@@ -70,26 +109,65 @@ static void wait_for_keypress(void)
     UART2_Read(&dummy, 1U);
 }
 
+static void step_pulse(void)
+{
+    hal.step_set();
+    hal.delay_us(500U);
+    hal.step_clear();
+    hal.delay_us(500U);
+}
+
+static void move_steps(int32_t steps)
+{
+    bool fwd = (steps >= 0);
+    uint32_t count = fwd ? (uint32_t)steps : (uint32_t)(-steps);
+    if (fwd) { hal.dir_set(); } else { hal.dir_clear(); }
+    hal.delay_us(10U);
+    for (uint32_t i = 0U; i < count; i++) { step_pulse(); }
+}
+
 int main(void)
 {
-    SYS_Initialize(NULL);    
-    LED1_OutputEnable();          /* TRISBCLR = (1U<<9) — MCC never set this */
-    LED2_OutputEnable();          /* TRISBCLR = (1U<<10) */
-    LED1_Set();
-  //  debug_print("\r\n--- TMC5160 Test Harness ---\r\n");
-  //  debug_print("Press any key to start...\r\n");
- //  debug_flush();
-    LED2_Set();
-  //  wait_for_keypress();
+    SYS_Initialize(NULL);
+    
+    LED1_Clear();
+    LED2_Clear();
 
-    /* --- Step 1: SPI comms check --- */
-    /* IOIN register returns chip version in bits 31:24.
-     * TMC5160 = 0x30, TMC5160A = 0x30
-     * If you read 0x00 or 0xFF the SPI wiring is wrong. */
- //   uint32_t ioin = stepper_read_reg(0x04U);
- //   uint8_t  version = (uint8_t)(ioin >> 24U);
+    debug_print("\r\n--- TMC5160 Test Harness ---\r\n");
+    debug_print("Press any key to start...\r\n");
+    debug_flush();
 
- /*   snprintf(uart_buf, sizeof(uart_buf),
+    wait_for_keypress();
+
+    /* --- Step 1 & 2: Init stepper (HAL + config), then verify SPI comms --- */
+    TMC5160_Config_t cfg = {
+        .drive_mode    = STEPPER_MODE_STEPDIR,
+        .chopper_mode  = STEPPER_CHOP_SPREADCYCLE,
+        .microsteps    = 16U,
+        .irun          = 20U,          /* ~65% of 3A = ~1.9A  */
+        .ihold         = 8U,           /* ~25% hold current    */
+        .iholddelay    = 6U,
+        .steps_per_mm  = 80.0f,
+        .fclk_hz       = 12000000U,    /* internal oscillator  */
+        .rsense_mohm   = 75U,          /* BTT TMC5160 PRO 75mΩ */
+        .invert_dir    = false,
+        .encoder_enable= false,
+    };
+
+    if (stepper_init_axis(0U, &cfg, &hal) == false)
+    {
+        debug_print("stepper_init_axis failed\r\n");
+        while (true) { ; }
+    }
+    debug_print("stepper_init_axis [OK]\r\n");
+    debug_flush();
+
+    /* IOIN: chip version in bits 31:24. TMC5160 = 0x30.
+     * 0x00 or 0xFF = SPI wiring fault. */
+    uint32_t ioin = stepper_read_reg(0U, 0x04U);
+    uint8_t  version = (uint8_t)(ioin >> 24U);
+
+    snprintf(uart_buf, sizeof(uart_buf),
              "IOIN = 0x%08lX  VERSION = 0x%02X %s\r\n",
              (unsigned long)ioin, version,
              (version == 0x30U) ? "[OK]" : "[FAIL - check SPI wiring]");
@@ -98,80 +176,39 @@ int main(void)
 
     if (version != 0x30U)
     {
-        debug_print("Halted — fix SPI before continuing.\r\n");
+        debug_print("Halted - fix SPI before continuing.\r\n");
         while (true) { ; }
     }
-*/
-    /* --- Step 2: Initialise stepper --- */
- /*   TMC5160_Config_t cfg = {
-        .drive_mode    = STEPPER_MODE_RAMP,
-        .chopper_mode  = STEPPER_CHOP_AUTO,
-        .microsteps    = 16U,
-        .irun          = 20U,          // ~65% of 3A = ~1.9A  
-        .ihold         = 8U,           // ~25% hold current    
-        .iholddelay    = 6U,
-        .steps_per_mm  = 80.0f,        //* adjust for your mechanics 
-        .fclk_hz       = 12000000U,    //* internal oscillator       
-        .rsense_mohm   = 110U,         //* BTT TMC5160 legacy        
-        .invert_dir    = false,
-        .encoder_enable= false,
-    };
 
-    if (!stepper_init(&cfg))
-    {
-        debug_print("stepper_init failed\r\n");
-        while (true) { ; }
-    }
-    debug_print("stepper_init [OK]\r\n");
+    /* --- Step 3: Move in Step/Dir mode --- */
+    stepper_enable(0U);
+    debug_print("Moving 16000 steps forward (~5 revolutions at 200spr/16ustep)...\r\n");
     debug_flush();
-*/
-    /* --- Step 3: Ramp config and move --- */
-  /*  
-    TMC5160_RampConfig_t ramp = {
-        .VSTART = 0U,
-        .A1     = 1000U,
-        .V1     = 10000U,
-        .AMAX   = 5000U,
-        .VMAX   = 50000U,
-        .DMAX   = 5000U,
-        .D1     = 1000U,
-        .VSTOP  = 10U,
-    };
 
-    stepper_set_ramp(&ramp);
-    stepper_enable();
-    stepper_move_to(1000);
+    move_steps(16000);
 
-    debug_print("Moving to 1000 usteps...\r\n");
-*/
-    /* --- Step 4: Poll until done --- */
-   /* TMC5160_MotorStatus_t st;
-    uint32_t timeout = 0U;
-
-    do {
-        stepper_poll(&st);
-        timeout++;
-        CORETIMER_DelayMs(10U);
-    } while (!st.pos_reached && timeout < 1000U);
-
+    /* Read DRV_STATUS after move */
+    uint32_t drv = stepper_read_reg(0U, 0x6FU);
     snprintf(uart_buf, sizeof(uart_buf),
-             "Done. pos=%ld  sg=%u  stall=%d  ot=%d  %s\r\n",
-             (long)st.xactual, st.sg_result, (int)st.stalled,
-             (int)st.overtemp,
-             st.pos_reached ? "[pos_reached]" : "[TIMEOUT]");
+             "Done. DRV_STATUS=0x%08lX  OLA=%d OLB=%d STST=%d\r\n",
+             (unsigned long)drv,
+             (int)((drv >> 29) & 1U),
+             (int)((drv >> 30) & 1U),
+             (int)((drv >> 31) & 1U));
     debug_print(uart_buf);
     debug_flush();
 
-    stepper_disable();
+    stepper_disable(0U);
     debug_print("--- Test Complete ---\r\n");
-*/
+
     while (true)
     {
-      LED1_Toggle();
-      CORETIMER_DelayMs(500U);
-        //SYS_Tasks();
+        LED1_Toggle();
+        CORETIMER_DelayMs(500U);
     }
 
     return EXIT_FAILURE;
 }
+
+
 

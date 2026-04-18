@@ -307,6 +307,24 @@ build_dir:
 	@echo "  Directory Structure Ready"
 	@echo "========================================"
 
+# -----------------------------------------------------------------------
+# Library target — archives the portable stepper library objects
+#
+# Usage:  make build   (compiles everything including stepper objects)
+#         make lib     (archives stepper objects into libs/libstepper.a)
+# The resulting .a plus stepper.h and stepper_hal.h can be dropped into
+# any other PIC32MZ project as a pre-built library.
+# -----------------------------------------------------------------------
+STEPPER_LIB_OBJS := $(OBJ_DIR)/stepper/stepper.o \
+                    $(OBJ_DIR)/stepper/stepper_transport.o
+
+lib: $(LIB_DIR)/libstepper.a
+
+$(LIB_DIR)/libstepper.a: $(STEPPER_LIB_OBJS) | $(LIB_DIR)
+	@echo "Archiving libstepper.a..."
+	$(AR) rcs $@ $^
+	@echo "Library ready: $@"
+
 # Create required directories
 $(OUT_DIR):
 	@$(call MKDIR,$@)
@@ -378,4 +396,4 @@ debug:
 	@$(foreach inc,$(INC_DIRS_INC),echo "  $(inc)";)
 	@echo "=========================================="
 
-.PHONY: all build_dir clean version debug
+.PHONY: all build_dir clean version debug lib

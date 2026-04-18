@@ -1,7 +1,6 @@
 # Build outputs
 tmc5160-ClickerMZ/bins/
 tmc5160-ClickerMZ/objs/
-tmc5160-ClickerMZ/libs/
 tmc5160-ClickerMZ/other/
 
 # MCC generated project (MPLABX/MCC side - regenerate from MCC as needed)

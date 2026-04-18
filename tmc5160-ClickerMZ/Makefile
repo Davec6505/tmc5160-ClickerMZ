@@ -52,6 +52,11 @@ ifneq ($(DFP),)
 	MAKE_ARGS += DFP="$(DFP)"
 endif
 
+lib:
+	@echo "######  BUILDING LIBRARY  ########"
+	$(BUILD) -C srcs lib $(MAKE_ARGS)
+	@echo "######  LIBRARY COMPLETE (libs/libstepper.a)  ########"
+
 # Default target: incremental build (only rebuilds changed files)
 build:
 	@echo "######  INCREMENTAL BUILD  ########"
