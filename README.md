@@ -17,7 +17,7 @@ tmc5160-ClickerMZ/          ← workspace / build root
 │   ├── stepper.h           ← public API
 │   ├── stepper_hal.h       ← HAL interface (fill in for your MCU)
 │   ├── stepper_transport.h ← TMC5160_Status_t (SPI frame status)
-│   └── tmc5160_reg.h       ← chip register map (advanced / debug)
+│   └── stepper_reg.h       ← chip register map (advanced / debug)
 ├── srcs/
 │   ├── main.c              ← test harness (ClickerMZ-specific)
 │   └── stepper/
@@ -84,7 +84,7 @@ LDFLAGS += -L/path/to/tmc5160-ClickerMZ/tmc5160-ClickerMZ/libs -lstepper
 #include "stepper_hal.h"  /* Stepper_HAL_t     */
 ```
 
-> `tmc5160_reg.h` is only needed for direct register-level access. Normal
+> `stepper_reg.h` is only needed for direct register-level access. Normal
 > applications do not need to include it.
 
 ---

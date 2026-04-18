@@ -31,6 +31,14 @@ typedef enum {
     STEPPER_CHOP_AUTO         = 2,  /* Chip auto-switches on TPWMTHRS/TCOOLTHRS  */
 } TMC5160_ChopperMode_t;
 
+/* Coil state at standstill (PWMCONF.FREEWHEEL) */
+typedef enum {
+    STEPPER_FREEWHEEL_NORMAL    = 0,  /* Coils energised — full hold torque    */
+    STEPPER_FREEWHEEL_FREEWHEEL = 1,  /* Open circuit — motor spins freely     */
+    STEPPER_FREEWHEEL_LS_SHORT  = 2,  /* Passive brake via low-side switches   */
+    STEPPER_FREEWHEEL_HS_SHORT  = 3,  /* Passive brake via high-side switches  */
+} TMC5160_Freewheel_t;
+
 /* ============================================================
  * Ramp configuration struct
  *
@@ -68,6 +76,22 @@ typedef struct {
     uint16_t              rsense_mohm;     /* Sense resistor mΩ — 75 BTT PRO, 110 standard */
     bool                  invert_dir;      /* Board-level direction invert (GCONF.SHAFT)   */
     bool                  encoder_enable;  /* Enable TMC5160 ABN encoder interface         */
+    uint32_t              enc_const;       /* ENC_CONST scaling factor (0 = skip write)    */
+
+    /* Standstill freewheel / braking (PWMCONF.FREEWHEEL) */
+    TMC5160_Freewheel_t   freewheel;       /* coil state at standstill; default = NORMAL   */
+
+    /* High-velocity / loss-free motion */
+    uint32_t              dcstep_vmin;     /* VDCMIN: 0=off; DCStep kicks in above this    */
+    uint32_t              thigh;           /* THIGH:  0=off; enables fullstep + DCStep     */
+
+    /* Zero-crossing wait between direction changes (ramp mode only) */
+    uint16_t              tzerowait;       /* TZEROWAIT tCLK cycles at V=0; 0 = disabled   */
+
+    /* Additional DIAG pin routing (GCONF) */
+    bool                  diag0_otpw;      /* DIAG0 = overtemperature pre-warning          */
+    bool                  diag1_index;     /* DIAG1 = microstep index pulse                */
+    bool                  diag1_onstate;   /* DIAG1 = on-state (active step pulse)         */
 } TMC5160_Config_t;
 
 /* ============================================================
@@ -87,6 +111,27 @@ typedef struct {
     bool     open_load_b;    /* Open load on coil B                   */
     TMC5160_Status_t spi_status; /* Last raw SPI status byte          */
 } TMC5160_MotorStatus_t;
+
+/* ============================================================
+ * Hardware stop switch configuration
+ *
+ * Zero-initialise to disable all stops (all fields default to false).
+ * Pass to stepper_sw_mode_config() — maps field-for-field to SW_MODE.
+ * ============================================================ */
+typedef struct {
+    bool stop_l_enable;     /* enable left  stop switch                     */
+    bool stop_r_enable;     /* enable right stop switch                     */
+    bool pol_stop_l;        /* polarity: true = active-high                 */
+    bool pol_stop_r;        /* polarity: true = active-high                 */
+    bool swap_lr;           /* swap left/right switch pin assignment        */
+    bool latch_l_active;    /* latch XACTUAL on active   edge — left        */
+    bool latch_l_inactive;  /* latch XACTUAL on inactive edge — left        */
+    bool latch_r_active;    /* latch XACTUAL on active   edge — right       */
+    bool latch_r_inactive;  /* latch XACTUAL on inactive edge — right       */
+    bool en_latch_encoder;  /* also latch encoder position when stop fires  */
+    bool sg_stop;           /* stop on StallGuard event (SWMODE.SG_STOP)   */
+    bool en_softstop;       /* soft stop (ramp to 0) vs hard stop           */
+} TMC5160_SwMode_t;
 
 /* ============================================================
  * Callbacks
@@ -165,5 +210,33 @@ void stepper_home(uint8_t axis, bool reverse, uint32_t creep_vmax,
  * ============================================================ */
 void     stepper_write_reg(uint8_t axis, uint8_t addr, uint32_t data);
 uint32_t stepper_read_reg(uint8_t axis, uint8_t addr);
+
+/* ============================================================
+ * Hardware stop switches  (SW_MODE register — ramp mode only)
+ *
+ * stepper_sw_mode_config() — write all fields of SW_MODE at once.
+ * stepper_get_xlatch()     — read XLATCH: position latched on stop event.
+ * stepper_get_ramp_stat()  — read RAMP_STAT: stop/latch/event status bits.
+ * ============================================================ */
+void     stepper_sw_mode_config(uint8_t axis, const TMC5160_SwMode_t *sw);
+int32_t  stepper_get_xlatch(uint8_t axis);
+uint32_t stepper_get_ramp_stat(uint8_t axis);
+
+/* ============================================================
+ * Runtime velocity band tuning
+ *
+ * tpwmthrs  — StealthChop → SpreadCycle upper threshold
+ * tcoolthrs — StallGuard / CoolStep enable threshold
+ * thigh     — DCStep / fullstep enable threshold (0 = disabled)
+ * ============================================================ */
+void stepper_set_velocity_bands(uint8_t axis,
+                                uint32_t tpwmthrs,
+                                uint32_t tcoolthrs,
+                                uint32_t thigh);
+
+/* ============================================================
+ * Position compare output (X_COMPARE — fires pulse on DIAG1)
+ * ============================================================ */
+void stepper_set_position_compare(uint8_t axis, int32_t pos);
 
 #endif /* STEPPER_H */

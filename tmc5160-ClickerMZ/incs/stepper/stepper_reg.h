@@ -1,5 +1,5 @@
-#ifndef TMC5160_REG_H
-#define TMC5160_REG_H
+#ifndef STEPPER_REG_H
+#define STEPPER_REG_H
 
 /* ============================================================
  * TMC5160 Register Map
@@ -77,15 +77,20 @@
 /* ============================================================
  * GCONF bit masks
  * ============================================================ */
-#define TMC5160_GCONF_RECALIBRATE       (1UL << 0)
-#define TMC5160_GCONF_FASTSTANDSTILL    (1UL << 1)
-#define TMC5160_GCONF_EN_PWM_MODE       (1UL << 2)   /* StealthChop */
-#define TMC5160_GCONF_MULTISTEP_FILT    (1UL << 3)
-#define TMC5160_GCONF_SHAFT             (1UL << 4)   /* invert direction */
-#define TMC5160_GCONF_DIAG0_ERROR       (1UL << 5)
-#define TMC5160_GCONF_DIAG1_STALL       (1UL << 8)   /* DIAG1 = stall flag */
-#define TMC5160_GCONF_DIAG1_POSCOMP     (1UL << 12)
-#define TMC5160_GCONF_STOP_ENABLE       (1UL << 15)
+#define TMC5160_GCONF_RECALIBRATE           (1UL << 0)
+#define TMC5160_GCONF_FASTSTANDSTILL        (1UL << 1)
+#define TMC5160_GCONF_EN_PWM_MODE           (1UL << 2)   /* StealthChop                    */
+#define TMC5160_GCONF_MULTISTEP_FILT        (1UL << 3)
+#define TMC5160_GCONF_SHAFT                 (1UL << 4)   /* invert direction               */
+#define TMC5160_GCONF_DIAG0_ERROR           (1UL << 5)   /* DIAG0 = driver error           */
+#define TMC5160_GCONF_DIAG0_OTPW            (1UL << 6)   /* DIAG0 = overtemp pre-warning   */
+#define TMC5160_GCONF_DIAG0_STALL           (1UL << 7)   /* DIAG0 = stall / step           */
+#define TMC5160_GCONF_DIAG1_STALL           (1UL << 8)   /* DIAG1 = stall flag             */
+#define TMC5160_GCONF_DIAG1_INDEX           (1UL << 9)   /* DIAG1 = microstep index pulse  */
+#define TMC5160_GCONF_DIAG1_ONSTATE         (1UL << 10)  /* DIAG1 = on-state               */
+#define TMC5160_GCONF_DIAG1_STEPS_SKIPPED   (1UL << 11)  /* DIAG1 = steps skipped (DCStep) */
+#define TMC5160_GCONF_DIAG1_POSCOMP         (1UL << 12)
+#define TMC5160_GCONF_STOP_ENABLE           (1UL << 15)
 
 /* ============================================================
  * CHOPCONF bit masks (key ones)
@@ -121,8 +126,18 @@
 /* ============================================================
  * RAMP_STAT bit masks
  * ============================================================ */
-#define TMC5160_RAMPSTAT_VEL_REACHED        (1UL << 8)
-#define TMC5160_RAMPSTAT_POS_REACHED        (1UL << 9)
+#define TMC5160_RAMPSTAT_STOP_L             (1UL << 0)   /* left stop switch active      */
+#define TMC5160_RAMPSTAT_STOP_R             (1UL << 1)   /* right stop switch active     */
+#define TMC5160_RAMPSTAT_LATCH_L            (1UL << 2)   /* XLATCH captured — left       */
+#define TMC5160_RAMPSTAT_LATCH_R            (1UL << 3)   /* XLATCH captured — right      */
+#define TMC5160_RAMPSTAT_EVENT_STOP_L       (1UL << 4)   /* stop-left event  (W1=clear)  */
+#define TMC5160_RAMPSTAT_EVENT_STOP_R       (1UL << 5)   /* stop-right event             */
+#define TMC5160_RAMPSTAT_EVENT_STOP_SG      (1UL << 6)   /* StallGuard stop event        */
+#define TMC5160_RAMPSTAT_EVENT_POS_REACHED  (1UL << 7)   /* position reached event       */
+#define TMC5160_RAMPSTAT_VEL_REACHED        (1UL << 8)   /* VMAX reached                 */
+#define TMC5160_RAMPSTAT_POS_REACHED        (1UL << 9)   /* XTARGET reached              */
+#define TMC5160_RAMPSTAT_VZERO              (1UL << 10)  /* currently at zero velocity   */
+#define TMC5160_RAMPSTAT_ZEROWAIT_ACTIVE    (1UL << 11)  /* TZEROWAIT running            */
 
 /* ============================================================
  * COOLCONF (StallGuard/CoolStep) field positions
@@ -136,8 +151,30 @@
 #define TMC5160_COOLCONF_SFILT              (1UL << 24)
 
 /* ============================================================
+ * SW_MODE bit masks  (hardware stop switch / latch control)
+ * ============================================================ */
+#define TMC5160_SWMODE_STOP_L_ENABLE    (1UL << 0)   /* enable left  stop switch      */
+#define TMC5160_SWMODE_STOP_R_ENABLE    (1UL << 1)   /* enable right stop switch      */
+#define TMC5160_SWMODE_POL_STOP_L       (1UL << 2)   /* polarity: 1 = active-high     */
+#define TMC5160_SWMODE_POL_STOP_R       (1UL << 3)
+#define TMC5160_SWMODE_SWAP_LR          (1UL << 4)   /* swap left/right pin assign    */
+#define TMC5160_SWMODE_LATCH_L_ACTIVE   (1UL << 5)   /* latch on active   edge — left */
+#define TMC5160_SWMODE_LATCH_L_INACTIVE (1UL << 6)   /* latch on inactive edge — left */
+#define TMC5160_SWMODE_LATCH_R_ACTIVE   (1UL << 7)
+#define TMC5160_SWMODE_LATCH_R_INACTIVE (1UL << 8)
+#define TMC5160_SWMODE_EN_LATCH_ENCODER (1UL << 9)   /* latch encoder on stop         */
+#define TMC5160_SWMODE_SG_STOP          (1UL << 10)  /* stop on StallGuard event      */
+#define TMC5160_SWMODE_EN_SOFTSTOP      (1UL << 11)  /* soft stop (ramp) vs hard stop */
+
+/* ============================================================
+ * PWMCONF — standstill freewheel / brake mode
+ * ============================================================ */
+#define TMC5160_PWMCONF_FREEWHEEL_SHIFT  20U
+#define TMC5160_PWMCONF_FREEWHEEL_MASK   (3UL << 20U)
+
+/* ============================================================
  * SPI write flag
  * ============================================================ */
 #define TMC5160_WRITE_FLAG              0x80U
 
-#endif /* TMC5160_REG_H */
+#endif /* STEPPER_REG_H */

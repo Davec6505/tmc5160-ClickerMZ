@@ -112,9 +112,9 @@ static void wait_for_keypress(void)
 static void step_pulse(void)
 {
     hal.step_set();
-    hal.delay_us(500U);
+    hal.delay_us(100U);
     hal.step_clear();
-    hal.delay_us(500U);
+    hal.delay_us(10U);
 }
 
 static void move_steps(int32_t steps)

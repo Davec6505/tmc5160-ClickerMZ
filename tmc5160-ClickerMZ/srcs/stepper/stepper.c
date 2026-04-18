@@ -1,6 +1,6 @@
 #include <stddef.h>
 #include "stepper.h"
-#include "tmc5160_reg.h"
+#include "stepper_reg.h"
 
 /* ---------------------------------------------------------------
  * Module state — one slot per axis
@@ -128,9 +128,16 @@ bool stepper_init_axis(uint8_t axis, const TMC5160_Config_t *cfg, const Stepper_
     if (hal->spi_write_read != NULL)
     {
         /* GCONF */
-        uint32_t gconf = TMC5160_GCONF_MULTISTEP_FILT
-                       | TMC5160_GCONF_DIAG0_ERROR
-                       | TMC5160_GCONF_DIAG1_STALL;
+        uint32_t gconf = TMC5160_GCONF_MULTISTEP_FILT;
+
+        /* DIAG0 routing */
+        gconf |= TMC5160_GCONF_DIAG0_ERROR;              /* always route errors to DIAG0 */
+        if (cfg->diag0_otpw)   { gconf |= TMC5160_GCONF_DIAG0_OTPW; }
+
+        /* DIAG1 routing */
+        if (cfg->diag1_index)   { gconf |= TMC5160_GCONF_DIAG1_INDEX; }
+        else if (cfg->diag1_onstate) { gconf |= TMC5160_GCONF_DIAG1_ONSTATE; }
+        else                    { gconf |= TMC5160_GCONF_DIAG1_STALL; } /* default */
 
         if (cfg->invert_dir)
         {
@@ -164,8 +171,23 @@ bool stepper_init_axis(uint8_t axis, const TMC5160_Config_t *cfg, const Stepper_
         /* StealthChop auto-tuning */
         if (cfg->chopper_mode != STEPPER_CHOP_SPREADCYCLE)
         {
+            /* PWM_GRAD auto, PWM_OFS auto, pwm_autoscale, pwm_autograd, freq=2 */
             uint32_t pwmconf = (1UL << 18U) | (1UL << 19U) | (12UL << 28U);
+
+            /* Apply freewheel bits (20:21) */
+            pwmconf |= (((uint32_t)cfg->freewheel) & 3UL) << TMC5160_PWMCONF_FREEWHEEL_SHIFT;
+
             STEPPER_WriteReg(hal, TMC5160_REG_PWMCONF, pwmconf, NULL);
+        }
+        else
+        {
+            /* SpreadCycle only: still set freewheel if non-zero */
+            if (cfg->freewheel != STEPPER_FREEWHEEL_NORMAL)
+            {
+                uint32_t pwmconf = (((uint32_t)cfg->freewheel) & 3UL)
+                                    << TMC5160_PWMCONF_FREEWHEEL_SHIFT;
+                STEPPER_WriteReg(hal, TMC5160_REG_PWMCONF, pwmconf, NULL);
+            }
         }
 
         /* Auto chopper switching thresholds */
@@ -179,6 +201,15 @@ bool stepper_init_axis(uint8_t axis, const TMC5160_Config_t *cfg, const Stepper_
             STEPPER_WriteReg(hal, TMC5160_REG_TPWMTHRS,  0U, NULL);
             STEPPER_WriteReg(hal, TMC5160_REG_TCOOLTHRS, 0U, NULL);
         }
+
+        /* THIGH: enables DCStep / fullstep above this velocity */
+        STEPPER_WriteReg(hal, TMC5160_REG_THIGH, cfg->thigh, NULL);
+
+        /* DCStep minimum velocity (0 = disabled) */
+        STEPPER_WriteReg(hal, TMC5160_REG_VDCMIN, cfg->dcstep_vmin, NULL);
+
+        /* TZEROWAIT: pause at V=0 between direction changes */
+        STEPPER_WriteReg(hal, TMC5160_REG_TZEROWAIT, (uint32_t)cfg->tzerowait, NULL);
 
         /* Encoder interface */
         if (cfg->encoder_enable)
@@ -424,4 +455,75 @@ uint32_t stepper_read_reg(uint8_t axis, uint8_t addr)
 {
     if (!AXIS_OK_SPI(axis)) { return 0U; }
     return STEPPER_ReadReg(s_hal[axis], addr, NULL);
+}
+
+/* ---------------------------------------------------------------
+ * Hardware stop switch configuration  (SW_MODE register)
+ *
+ * Maps every field of TMC5160_SwMode_t directly to the SW_MODE
+ * register bits.  Call after stepper_init_axis().
+ * --------------------------------------------------------------- */
+void stepper_sw_mode_config(uint8_t axis, const TMC5160_SwMode_t *sw)
+{
+    if (!AXIS_OK_SPI(axis) || sw == NULL) { return; }
+
+    uint32_t reg = 0U;
+    if (sw->stop_l_enable)    { reg |= TMC5160_SWMODE_STOP_L_ENABLE; }
+    if (sw->stop_r_enable)    { reg |= TMC5160_SWMODE_STOP_R_ENABLE; }
+    if (sw->pol_stop_l)       { reg |= TMC5160_SWMODE_POL_STOP_L; }
+    if (sw->pol_stop_r)       { reg |= TMC5160_SWMODE_POL_STOP_R; }
+    if (sw->swap_lr)          { reg |= TMC5160_SWMODE_SWAP_LR; }
+    if (sw->latch_l_active)   { reg |= TMC5160_SWMODE_LATCH_L_ACTIVE; }
+    if (sw->latch_l_inactive) { reg |= TMC5160_SWMODE_LATCH_L_INACTIVE; }
+    if (sw->latch_r_active)   { reg |= TMC5160_SWMODE_LATCH_R_ACTIVE; }
+    if (sw->latch_r_inactive) { reg |= TMC5160_SWMODE_LATCH_R_INACTIVE; }
+    if (sw->en_latch_encoder) { reg |= TMC5160_SWMODE_EN_LATCH_ENCODER; }
+    if (sw->sg_stop)          { reg |= TMC5160_SWMODE_SG_STOP; }
+    if (sw->en_softstop)      { reg |= TMC5160_SWMODE_EN_SOFTSTOP; }
+
+    STEPPER_WriteReg(s_hal[axis], TMC5160_REG_SW_MODE, reg, NULL);
+}
+
+/* Return latched position captured on last stop event */
+int32_t stepper_get_xlatch(uint8_t axis)
+{
+    if (!AXIS_OK_SPI(axis)) { return 0; }
+    return (int32_t)STEPPER_ReadReg(s_hal[axis], TMC5160_REG_XLATCH, NULL);
+}
+
+/* Return raw RAMP_STAT register — test against TMC5160_RAMPSTAT_* masks */
+uint32_t stepper_get_ramp_stat(uint8_t axis)
+{
+    if (!AXIS_OK_SPI(axis)) { return 0U; }
+    return STEPPER_ReadReg(s_hal[axis], TMC5160_REG_RAMP_STAT, NULL);
+}
+
+/* ---------------------------------------------------------------
+ * Runtime velocity band tuning
+ *
+ * tpwmthrs  : TSTEP threshold for StealthChop -> SpreadCycle switch
+ * tcoolthrs : TSTEP threshold to enable StallGuard / CoolStep
+ * thigh     : TSTEP threshold to enable fullstep / DCStep (0=off)
+ *
+ * All three are TSTEP-based (inverse velocity) — larger value = lower speed.
+ * --------------------------------------------------------------- */
+void stepper_set_velocity_bands(uint8_t axis,
+                                uint32_t tpwmthrs,
+                                uint32_t tcoolthrs,
+                                uint32_t thigh)
+{
+    if (!AXIS_OK_SPI(axis)) { return; }
+    STEPPER_WriteReg(s_hal[axis], TMC5160_REG_TPWMTHRS,  tpwmthrs,  NULL);
+    STEPPER_WriteReg(s_hal[axis], TMC5160_REG_TCOOLTHRS, tcoolthrs, NULL);
+    STEPPER_WriteReg(s_hal[axis], TMC5160_REG_THIGH,     thigh,     NULL);
+}
+
+/* ---------------------------------------------------------------
+ * Position compare — fires a pulse on DIAG1 when XACTUAL == pos
+ * Requires GCONF.DIAG1_POSCOMP to be set (not set by default).
+ * --------------------------------------------------------------- */
+void stepper_set_position_compare(uint8_t axis, int32_t pos)
+{
+    if (!AXIS_OK_SPI(axis)) { return; }
+    STEPPER_WriteReg(s_hal[axis], TMC5160_REG_X_COMPARE, (uint32_t)pos, NULL);
 }
