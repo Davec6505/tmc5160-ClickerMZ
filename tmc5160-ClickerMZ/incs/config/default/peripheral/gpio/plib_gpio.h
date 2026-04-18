@@ -92,6 +92,46 @@
 #define Step_GetLatch()          ((LATB >> 3) & 0x1U)
 #define Step_PIN                  GPIO_PIN_RB3
 
+/*** Macros for SW1 pin ***/
+#define SW1_Set()               (LATBSET = (1U<<8))
+#define SW1_Clear()             (LATBCLR = (1U<<8))
+#define SW1_Toggle()            (LATBINV= (1U<<8))
+#define SW1_OutputEnable()      (TRISBCLR = (1U<<8))
+#define SW1_InputEnable()       (TRISBSET = (1U<<8))
+#define SW1_Get()               ((PORTB >> 8) & 0x1U)
+#define SW1_GetLatch()          ((LATB >> 8) & 0x1U)
+#define SW1_PIN                  GPIO_PIN_RB8
+
+/*** Macros for LED1 pin ***/
+#define LED1_Set()               (LATBSET = (1U<<9))
+#define LED1_Clear()             (LATBCLR = (1U<<9))
+#define LED1_Toggle()            (LATBINV= (1U<<9))
+#define LED1_OutputEnable()      (TRISBCLR = (1U<<9))
+#define LED1_InputEnable()       (TRISBSET = (1U<<9))
+#define LED1_Get()               ((PORTB >> 9) & 0x1U)
+#define LED1_GetLatch()          ((LATB >> 9) & 0x1U)
+#define LED1_PIN                  GPIO_PIN_RB9
+
+/*** Macros for LED2 pin ***/
+#define LED2_Set()               (LATBSET = (1U<<10))
+#define LED2_Clear()             (LATBCLR = (1U<<10))
+#define LED2_Toggle()            (LATBINV= (1U<<10))
+#define LED2_OutputEnable()      (TRISBCLR = (1U<<10))
+#define LED2_InputEnable()       (TRISBSET = (1U<<10))
+#define LED2_Get()               ((PORTB >> 10) & 0x1U)
+#define LED2_GetLatch()          ((LATB >> 10) & 0x1U)
+#define LED2_PIN                  GPIO_PIN_RB10
+
+/*** Macros for SW2 pin ***/
+#define SW2_Set()               (LATBSET = (1U<<11))
+#define SW2_Clear()             (LATBCLR = (1U<<11))
+#define SW2_Toggle()            (LATBINV= (1U<<11))
+#define SW2_OutputEnable()      (TRISBCLR = (1U<<11))
+#define SW2_InputEnable()       (TRISBSET = (1U<<11))
+#define SW2_Get()               ((PORTB >> 11) & 0x1U)
+#define SW2_GetLatch()          ((LATB >> 11) & 0x1U)
+#define SW2_PIN                  GPIO_PIN_RB11
+
 /*** Macros for DIAG0 pin ***/
 #define DIAG0_Set()               (LATBSET = (1U<<12))
 #define DIAG0_Clear()             (LATBCLR = (1U<<12))

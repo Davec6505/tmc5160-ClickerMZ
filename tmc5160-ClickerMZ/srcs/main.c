@@ -28,7 +28,7 @@
 #include <stdio.h>
 #include "definitions.h"
 #include "stepper.h"
-
+#include "plib_gpio.h"
 
 // *****************************************************************************
 // *****************************************************************************
@@ -56,42 +56,63 @@ static void debug_print(const char *msg)
     UART2_Write((uint8_t *)msg, strlen(msg));
 }
 
+/* Block until the TX ring buffer has fully drained to the hardware */
+static void debug_flush(void)
+{
+    while (!UART2_TransmitComplete()) { ; }
+}
+
+/* Block until at least one RX byte arrives, discard it */
+static void wait_for_keypress(void)
+{
+    uint8_t dummy;
+    while (UART2_ReadCountGet() == 0U) { ; }
+    UART2_Read(&dummy, 1U);
+}
+
 int main(void)
 {
-    SYS_Initialize(NULL);
-
-    debug_print("\r\n--- TMC5160 Test Start ---\r\n");
+    SYS_Initialize(NULL);    
+    LED1_OutputEnable();          /* TRISBCLR = (1U<<9) — MCC never set this */
+    LED2_OutputEnable();          /* TRISBCLR = (1U<<10) */
+    LED1_Set();
+  //  debug_print("\r\n--- TMC5160 Test Harness ---\r\n");
+  //  debug_print("Press any key to start...\r\n");
+ //  debug_flush();
+    LED2_Set();
+  //  wait_for_keypress();
 
     /* --- Step 1: SPI comms check --- */
     /* IOIN register returns chip version in bits 31:24.
      * TMC5160 = 0x30, TMC5160A = 0x30
      * If you read 0x00 or 0xFF the SPI wiring is wrong. */
-    uint32_t ioin = stepper_read_reg(0x04U);
-    uint8_t  version = (uint8_t)(ioin >> 24U);
+ //   uint32_t ioin = stepper_read_reg(0x04U);
+ //   uint8_t  version = (uint8_t)(ioin >> 24U);
 
-    snprintf(uart_buf, sizeof(uart_buf),
+ /*   snprintf(uart_buf, sizeof(uart_buf),
              "IOIN = 0x%08lX  VERSION = 0x%02X %s\r\n",
              (unsigned long)ioin, version,
              (version == 0x30U) ? "[OK]" : "[FAIL - check SPI wiring]");
     debug_print(uart_buf);
+    debug_flush();
 
     if (version != 0x30U)
     {
         debug_print("Halted — fix SPI before continuing.\r\n");
         while (true) { ; }
     }
-
+*/
     /* --- Step 2: Initialise stepper --- */
-    TMC5160_Config_t cfg = {
+ /*   TMC5160_Config_t cfg = {
         .drive_mode    = STEPPER_MODE_RAMP,
         .chopper_mode  = STEPPER_CHOP_AUTO,
         .microsteps    = 16U,
-        .irun          = 20U,          /* ~65% of 3A = ~1.9A  */
-        .ihold         = 8U,           /* ~25% hold current    */
+        .irun          = 20U,          // ~65% of 3A = ~1.9A  
+        .ihold         = 8U,           // ~25% hold current    
         .iholddelay    = 6U,
-        .steps_per_mm  = 80.0f,        /* adjust for your mechanics */
-        .fclk_hz       = 12000000U,    /* internal oscillator       */
-        .rsense_mohm   = 75U,          /* BTT TMC5160 PRO           */
+        .steps_per_mm  = 80.0f,        //* adjust for your mechanics 
+        .fclk_hz       = 12000000U,    //* internal oscillator       
+        .rsense_mohm   = 110U,         //* BTT TMC5160 legacy        
         .invert_dir    = false,
         .encoder_enable= false,
     };
@@ -102,8 +123,10 @@ int main(void)
         while (true) { ; }
     }
     debug_print("stepper_init [OK]\r\n");
-
+    debug_flush();
+*/
     /* --- Step 3: Ramp config and move --- */
+  /*  
     TMC5160_RampConfig_t ramp = {
         .VSTART = 0U,
         .A1     = 1000U,
@@ -120,9 +143,9 @@ int main(void)
     stepper_move_to(1000);
 
     debug_print("Moving to 1000 usteps...\r\n");
-
+*/
     /* --- Step 4: Poll until done --- */
-    TMC5160_MotorStatus_t st;
+   /* TMC5160_MotorStatus_t st;
     uint32_t timeout = 0U;
 
     do {
@@ -137,13 +160,16 @@ int main(void)
              (int)st.overtemp,
              st.pos_reached ? "[pos_reached]" : "[TIMEOUT]");
     debug_print(uart_buf);
+    debug_flush();
 
     stepper_disable();
     debug_print("--- Test Complete ---\r\n");
-
+*/
     while (true)
     {
-        SYS_Tasks();
+      LED1_Toggle();
+      CORETIMER_DelayMs(500U);
+        //SYS_Tasks();
     }
 
     return EXIT_FAILURE;
