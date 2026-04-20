@@ -5,22 +5,10 @@
 #define MM_PER_INCH  25.4f
 
 /* ---------------------------------------------------------------
- * Module state — one slot per axis
- * --------------------------------------------------------------- */
-static TMC5160_Config_t        s_cfg[STEPPER_MAX_AXES];
-static TMC5160_RampConfig_t    s_ramp[STEPPER_MAX_AXES];
-static TMC5160_StallCallback_t s_stall_cb[STEPPER_MAX_AXES];
-static TMC5160_HomeCallback_t  s_home_cb[STEPPER_MAX_AXES];
-static TMC5160_MotorStatus_t   s_status[STEPPER_MAX_AXES];
-static const Stepper_HAL_t    *s_hal[STEPPER_MAX_AXES];
-static bool                    s_initialised[STEPPER_MAX_AXES];
-static int32_t                 s_pos_usteps[STEPPER_MAX_AXES]; /* software counter (step/dir mode) */
-
-/* ---------------------------------------------------------------
  * Guard helpers
  * --------------------------------------------------------------- */
-#define AXIS_OK(a)      ((a) < STEPPER_MAX_AXES && s_initialised[(a)])
-#define AXIS_OK_SPI(a)  (AXIS_OK(a) && s_hal[(a)]->spi_write_read != NULL)
+#define MOTOR_OK(m)      ((m) != NULL && (m)->initialised)
+#define MOTOR_OK_SPI(m)  (MOTOR_OK(m) && (m)->hal->spi_write_read != NULL)
 
 /* ---------------------------------------------------------------
  * CHOPCONF.MRES encoding
@@ -90,57 +78,57 @@ static uint32_t build_chopconf(const TMC5160_Config_t *cfg, bool stealthchop_en)
  *
  *   VMAX_reg = v [usteps/s] × 2^23 / fCLK
  * --------------------------------------------------------------- */
-static float usteps_per_mm(uint8_t axis)
+static float usteps_per_mm(const Stepper_t *motor)
 {
-    return s_cfg[axis].steps_per_mm * (float)s_cfg[axis].microsteps;
+    return motor->cfg.steps_per_mm * (float)motor->cfg.microsteps;
 }
 
-static float usteps_per_deg(uint8_t axis)
+static float usteps_per_deg(const Stepper_t *motor)
 {
-    return s_cfg[axis].steps_per_deg * (float)s_cfg[axis].microsteps;
+    return motor->cfg.steps_per_deg * (float)motor->cfg.microsteps;
 }
 
-uint32_t stepper_mmps_to_vmax(uint8_t axis, float mm_per_sec)
+uint32_t stepper_mmps_to_vmax(Stepper_t *motor, float mm_per_sec)
 {
-    if (!AXIS_OK(axis)) { return 0U; }
-    float v = mm_per_sec * usteps_per_mm(axis);
-    return (uint32_t)(v * 8388608.0f / (float)s_cfg[axis].fclk_hz);
+    if (!MOTOR_OK(motor)) { return 0U; }
+    float v = mm_per_sec * usteps_per_mm(motor);
+    return (uint32_t)(v * 8388608.0f / (float)motor->cfg.fclk_hz);
 }
 
-uint32_t stepper_dps_to_vmax(uint8_t axis, float deg_per_sec)
+uint32_t stepper_dps_to_vmax(Stepper_t *motor, float deg_per_sec)
 {
-    if (!AXIS_OK(axis) || s_cfg[axis].steps_per_deg == 0.0f) { return 0U; }
-    float v = deg_per_sec * usteps_per_deg(axis);
-    return (uint32_t)(v * 8388608.0f / (float)s_cfg[axis].fclk_hz);
+    if (!MOTOR_OK(motor) || motor->cfg.steps_per_deg == 0.0f) { return 0U; }
+    float v = deg_per_sec * usteps_per_deg(motor);
+    return (uint32_t)(v * 8388608.0f / (float)motor->cfg.fclk_hz);
 }
 
-int32_t stepper_pos_to_usteps(uint8_t axis, float mm)
+int32_t stepper_pos_to_usteps(Stepper_t *motor, float mm)
 {
-    if (!AXIS_OK(axis)) { return 0; }
-    return (int32_t)(mm * usteps_per_mm(axis));
+    if (!MOTOR_OK(motor)) { return 0; }
+    return (int32_t)(mm * usteps_per_mm(motor));
 }
 
-float stepper_usteps_to_mm(uint8_t axis, int32_t usteps)
+float stepper_usteps_to_mm(Stepper_t *motor, int32_t usteps)
 {
-    if (!AXIS_OK(axis)) { return 0.0f; }
-    return (float)usteps / usteps_per_mm(axis);
+    if (!MOTOR_OK(motor)) { return 0.0f; }
+    return (float)usteps / usteps_per_mm(motor);
 }
 
 /* ---------------------------------------------------------------
  * Initialisation
  * --------------------------------------------------------------- */
-bool stepper_init_axis(uint8_t axis, const TMC5160_Config_t *cfg, const Stepper_HAL_t *hal)
+bool stepper_init(Stepper_t *motor, const TMC5160_Config_t *cfg, const Stepper_HAL_t *hal)
 {
-    if (axis >= STEPPER_MAX_AXES || cfg == NULL || hal == NULL) { return false; }
+    if (motor == NULL || cfg == NULL || hal == NULL) { return false; }
 
-    s_cfg[axis]         = *cfg;
-    s_hal[axis]         = hal;
-    s_stall_cb[axis]    = NULL;
-    s_home_cb[axis]     = NULL;
-    s_initialised[axis] = true;
-    s_pos_usteps[axis]  = 0;
+    motor->cfg         = *cfg;
+    motor->hal         = hal;
+    motor->stall_cb    = NULL;
+    motor->home_cb     = NULL;
+    motor->initialised = true;
+    motor->pos_usteps  = 0;
 
-    stepper_disable(axis);   /* keep driver off during register setup */
+    stepper_disable(motor);   /* keep driver off during register setup */
 
     /* --- SPI register init (TMC5160) — skipped for step/dir-only drivers --- */
     if (hal->spi_write_read != NULL)
@@ -258,190 +246,179 @@ bool stepper_init_axis(uint8_t axis, const TMC5160_Config_t *cfg, const Stepper_
 /* ---------------------------------------------------------------
  * Enable / Disable  (ENN = active LOW)
  * --------------------------------------------------------------- */
-void stepper_enable(uint8_t axis)
+void stepper_enable(Stepper_t *motor)
 {
-    if (AXIS_OK(axis)) { s_hal[axis]->en_assert(); }
+    if (MOTOR_OK(motor)) { motor->hal->en_assert(); }
 }
 
-void stepper_disable(uint8_t axis)
+void stepper_disable(Stepper_t *motor)
 {
-    if (AXIS_OK(axis)) { s_hal[axis]->en_deassert(); }
-}
-
-void stepper_stop_all(void)
-{
-    for (uint8_t i = 0U; i < STEPPER_MAX_AXES; i++)
-    {
-        if (s_initialised[i])
-        {
-            stepper_stop(i);
-        }
-    }
+    if (MOTOR_OK(motor)) { motor->hal->en_deassert(); }
 }
 
 /* ---------------------------------------------------------------
  * Ramp configuration  (TMC5160 ramp mode)
  * --------------------------------------------------------------- */
-void stepper_set_ramp(uint8_t axis, const TMC5160_RampConfig_t *ramp)
+void stepper_set_ramp(Stepper_t *motor, const TMC5160_RampConfig_t *ramp)
 {
-    if (!AXIS_OK_SPI(axis) || ramp == NULL) { return; }
+    if (!MOTOR_OK_SPI(motor) || ramp == NULL) { return; }
 
-    s_ramp[axis] = *ramp;
+    motor->ramp = *ramp;
 
-    STEPPER_WriteReg(s_hal[axis], TMC5160_REG_VSTART, ramp->VSTART, NULL);
-    STEPPER_WriteReg(s_hal[axis], TMC5160_REG_A1,     ramp->A1,     NULL);
-    STEPPER_WriteReg(s_hal[axis], TMC5160_REG_V1,     ramp->V1,     NULL);
-    STEPPER_WriteReg(s_hal[axis], TMC5160_REG_AMAX,   ramp->AMAX,   NULL);
-    STEPPER_WriteReg(s_hal[axis], TMC5160_REG_VMAX,   ramp->VMAX,   NULL);
-    STEPPER_WriteReg(s_hal[axis], TMC5160_REG_DMAX,   ramp->DMAX,   NULL);
-    STEPPER_WriteReg(s_hal[axis], TMC5160_REG_D1,     ramp->D1,     NULL);
-    STEPPER_WriteReg(s_hal[axis], TMC5160_REG_VSTOP,  ramp->VSTOP,  NULL);
+    STEPPER_WriteReg(motor->hal, TMC5160_REG_VSTART, ramp->VSTART, NULL);
+    STEPPER_WriteReg(motor->hal, TMC5160_REG_A1,     ramp->A1,     NULL);
+    STEPPER_WriteReg(motor->hal, TMC5160_REG_V1,     ramp->V1,     NULL);
+    STEPPER_WriteReg(motor->hal, TMC5160_REG_AMAX,   ramp->AMAX,   NULL);
+    STEPPER_WriteReg(motor->hal, TMC5160_REG_VMAX,   ramp->VMAX,   NULL);
+    STEPPER_WriteReg(motor->hal, TMC5160_REG_DMAX,   ramp->DMAX,   NULL);
+    STEPPER_WriteReg(motor->hal, TMC5160_REG_D1,     ramp->D1,     NULL);
+    STEPPER_WriteReg(motor->hal, TMC5160_REG_VSTOP,  ramp->VSTOP,  NULL);
 }
 
 /* ---------------------------------------------------------------
  * Motion — ramp mode
  * --------------------------------------------------------------- */
-void stepper_move_to(uint8_t axis, int32_t position)
+void stepper_move_to(Stepper_t *motor, int32_t position)
 {
-    if (!AXIS_OK_SPI(axis)) { return; }
-    STEPPER_WriteReg(s_hal[axis], TMC5160_REG_RAMPMODE, TMC5160_RAMPMODE_POSITION, NULL);
-    STEPPER_WriteReg(s_hal[axis], TMC5160_REG_XTARGET,  (uint32_t)position,        NULL);
+    if (!MOTOR_OK_SPI(motor)) { return; }
+    STEPPER_WriteReg(motor->hal, TMC5160_REG_RAMPMODE, TMC5160_RAMPMODE_POSITION, NULL);
+    STEPPER_WriteReg(motor->hal, TMC5160_REG_XTARGET,  (uint32_t)position,        NULL);
 }
 
-void stepper_move_relative(uint8_t axis, int32_t delta)
+void stepper_move_relative(Stepper_t *motor, int32_t delta)
 {
-    if (!AXIS_OK_SPI(axis)) { return; }
-    int32_t current = (int32_t)STEPPER_ReadReg(s_hal[axis], TMC5160_REG_XACTUAL, NULL);
-    stepper_move_to(axis, current + delta);
+    if (!MOTOR_OK_SPI(motor)) { return; }
+    int32_t current = (int32_t)STEPPER_ReadReg(motor->hal, TMC5160_REG_XACTUAL, NULL);
+    stepper_move_to(motor, current + delta);
 }
 
-void stepper_run(uint8_t axis, uint32_t vmax, bool reverse)
+void stepper_run(Stepper_t *motor, uint32_t vmax, bool reverse)
 {
-    if (!AXIS_OK_SPI(axis)) { return; }
+    if (!MOTOR_OK_SPI(motor)) { return; }
     uint32_t mode = reverse ? TMC5160_RAMPMODE_VEL_NEG : TMC5160_RAMPMODE_VEL_POS;
-    STEPPER_WriteReg(s_hal[axis], TMC5160_REG_VMAX,     vmax, NULL);
-    STEPPER_WriteReg(s_hal[axis], TMC5160_REG_RAMPMODE, mode, NULL);
+    STEPPER_WriteReg(motor->hal, TMC5160_REG_VMAX,     vmax, NULL);
+    STEPPER_WriteReg(motor->hal, TMC5160_REG_RAMPMODE, mode, NULL);
 }
 
-void stepper_stop(uint8_t axis)
+void stepper_stop(Stepper_t *motor)
 {
-    if (!AXIS_OK_SPI(axis)) { return; }
-    STEPPER_WriteReg(s_hal[axis], TMC5160_REG_VMAX, 0U, NULL);
+    if (!MOTOR_OK_SPI(motor)) { return; }
+    STEPPER_WriteReg(motor->hal, TMC5160_REG_VMAX, 0U, NULL);
 }
 
-void stepper_set_position_zero(uint8_t axis)
+void stepper_set_position_zero(Stepper_t *motor)
 {
-    if (AXIS_OK_SPI(axis))
+    if (MOTOR_OK_SPI(motor))
     {
-        STEPPER_WriteReg(s_hal[axis], TMC5160_REG_XACTUAL, 0U, NULL);
-        STEPPER_WriteReg(s_hal[axis], TMC5160_REG_XTARGET, 0U, NULL);
+        STEPPER_WriteReg(motor->hal, TMC5160_REG_XACTUAL, 0U, NULL);
+        STEPPER_WriteReg(motor->hal, TMC5160_REG_XTARGET, 0U, NULL);
     }
-    if (AXIS_OK(axis)) { s_pos_usteps[axis] = 0; }
+    if (MOTOR_OK(motor)) { motor->pos_usteps = 0; }
 }
 
 /* ---------------------------------------------------------------
  * Engineering unit wrappers — linear (mm / inch)
  * --------------------------------------------------------------- */
-void stepper_move_mm(uint8_t axis, float mm)
+void stepper_move_mm(Stepper_t *motor, float mm)
 {
-    stepper_move_relative(axis, stepper_pos_to_usteps(axis, mm));
+    stepper_move_relative(motor, stepper_pos_to_usteps(motor, mm));
 }
 
-void stepper_move_to_mm(uint8_t axis, float mm)
+void stepper_move_to_mm(Stepper_t *motor, float mm)
 {
-    if (!AXIS_OK(axis)) { return; }
-    stepper_move_to(axis, (int32_t)(mm * usteps_per_mm(axis)));
+    if (!MOTOR_OK(motor)) { return; }
+    stepper_move_to(motor, (int32_t)(mm * usteps_per_mm(motor)));
 }
 
-void stepper_run_mmps(uint8_t axis, float mm_per_sec, bool reverse)
+void stepper_run_mmps(Stepper_t *motor, float mm_per_sec, bool reverse)
 {
-    stepper_run(axis, stepper_mmps_to_vmax(axis, mm_per_sec), reverse);
+    stepper_run(motor, stepper_mmps_to_vmax(motor, mm_per_sec), reverse);
 }
 
-void stepper_move_inch(uint8_t axis, float inch)
+void stepper_move_inch(Stepper_t *motor, float inch)
 {
-    stepper_move_mm(axis, inch * MM_PER_INCH);
+    stepper_move_mm(motor, inch * MM_PER_INCH);
 }
 
-void stepper_move_to_inch(uint8_t axis, float inch)
+void stepper_move_to_inch(Stepper_t *motor, float inch)
 {
-    stepper_move_to_mm(axis, inch * MM_PER_INCH);
+    stepper_move_to_mm(motor, inch * MM_PER_INCH);
 }
 
-void stepper_run_ips(uint8_t axis, float inch_per_sec, bool reverse)
+void stepper_run_ips(Stepper_t *motor, float inch_per_sec, bool reverse)
 {
-    stepper_run_mmps(axis, inch_per_sec * MM_PER_INCH, reverse);
+    stepper_run_mmps(motor, inch_per_sec * MM_PER_INCH, reverse);
 }
 
-float stepper_get_position_mm(uint8_t axis)
+float stepper_get_position_mm(Stepper_t *motor)
 {
-    if (!AXIS_OK(axis)) { return 0.0f; }
-    int32_t pos = (s_cfg[axis].drive_mode == STEPPER_MODE_STEPDIR)
-                ? s_pos_usteps[axis]
-                : s_status[axis].xactual;
-    float mm = (float)pos / usteps_per_mm(axis);
-    return (s_cfg[axis].units == STEPPER_UNITS_INCH) ? mm / MM_PER_INCH : mm;
+    if (!MOTOR_OK(motor)) { return 0.0f; }
+    int32_t pos = (motor->cfg.drive_mode == STEPPER_MODE_STEPDIR)
+                ? motor->pos_usteps
+                : motor->status.xactual;
+    float mm = (float)pos / usteps_per_mm(motor);
+    return (motor->cfg.units == STEPPER_UNITS_INCH) ? mm / MM_PER_INCH : mm;
 }
 
-float stepper_get_position_inch(uint8_t axis)
+float stepper_get_position_inch(Stepper_t *motor)
 {
-    if (!AXIS_OK(axis)) { return 0.0f; }
-    int32_t pos = (s_cfg[axis].drive_mode == STEPPER_MODE_STEPDIR)
-                ? s_pos_usteps[axis]
-                : s_status[axis].xactual;
-    return (float)pos / usteps_per_mm(axis) / MM_PER_INCH;
+    if (!MOTOR_OK(motor)) { return 0.0f; }
+    int32_t pos = (motor->cfg.drive_mode == STEPPER_MODE_STEPDIR)
+                ? motor->pos_usteps
+                : motor->status.xactual;
+    return (float)pos / usteps_per_mm(motor) / MM_PER_INCH;
 }
 
-void stepper_set_position_mm(uint8_t axis, float mm)
+void stepper_set_position_mm(Stepper_t *motor, float mm)
 {
-    if (!AXIS_OK(axis)) { return; }
-    int32_t usteps = (int32_t)(mm * usteps_per_mm(axis));
-    s_pos_usteps[axis] = usteps;
-    if (AXIS_OK_SPI(axis))
+    if (!MOTOR_OK(motor)) { return; }
+    int32_t usteps = (int32_t)(mm * usteps_per_mm(motor));
+    motor->pos_usteps = usteps;
+    if (MOTOR_OK_SPI(motor))
     {
-        STEPPER_WriteReg(s_hal[axis], TMC5160_REG_XACTUAL, (uint32_t)usteps, NULL);
-        STEPPER_WriteReg(s_hal[axis], TMC5160_REG_XTARGET, (uint32_t)usteps, NULL);
+        STEPPER_WriteReg(motor->hal, TMC5160_REG_XACTUAL, (uint32_t)usteps, NULL);
+        STEPPER_WriteReg(motor->hal, TMC5160_REG_XTARGET, (uint32_t)usteps, NULL);
     }
 }
 
 /* ---------------------------------------------------------------
  * Rotation axis wrappers (steps_per_deg must be > 0)
  * --------------------------------------------------------------- */
-void stepper_move_deg(uint8_t axis, float deg)
+void stepper_move_deg(Stepper_t *motor, float deg)
 {
-    if (!AXIS_OK(axis) || s_cfg[axis].steps_per_deg == 0.0f) { return; }
-    stepper_move_relative(axis, (int32_t)(deg * usteps_per_deg(axis)));
+    if (!MOTOR_OK(motor) || motor->cfg.steps_per_deg == 0.0f) { return; }
+    stepper_move_relative(motor, (int32_t)(deg * usteps_per_deg(motor)));
 }
 
-void stepper_move_to_deg(uint8_t axis, float deg)
+void stepper_move_to_deg(Stepper_t *motor, float deg)
 {
-    if (!AXIS_OK(axis) || s_cfg[axis].steps_per_deg == 0.0f) { return; }
-    stepper_move_to(axis, (int32_t)(deg * usteps_per_deg(axis)));
+    if (!MOTOR_OK(motor) || motor->cfg.steps_per_deg == 0.0f) { return; }
+    stepper_move_to(motor, (int32_t)(deg * usteps_per_deg(motor)));
 }
 
-void stepper_run_dps(uint8_t axis, float deg_per_sec, bool reverse)
+void stepper_run_dps(Stepper_t *motor, float deg_per_sec, bool reverse)
 {
-    stepper_run(axis, stepper_dps_to_vmax(axis, deg_per_sec), reverse);
+    stepper_run(motor, stepper_dps_to_vmax(motor, deg_per_sec), reverse);
 }
 
-float stepper_get_position_deg(uint8_t axis)
+float stepper_get_position_deg(Stepper_t *motor)
 {
-    if (!AXIS_OK(axis) || s_cfg[axis].steps_per_deg == 0.0f) { return 0.0f; }
-    int32_t pos = (s_cfg[axis].drive_mode == STEPPER_MODE_STEPDIR)
-                ? s_pos_usteps[axis]
-                : s_status[axis].xactual;
-    return (float)pos / usteps_per_deg(axis);
+    if (!MOTOR_OK(motor) || motor->cfg.steps_per_deg == 0.0f) { return 0.0f; }
+    int32_t pos = (motor->cfg.drive_mode == STEPPER_MODE_STEPDIR)
+                ? motor->pos_usteps
+                : motor->status.xactual;
+    return (float)pos / usteps_per_deg(motor);
 }
 
-void stepper_set_position_deg(uint8_t axis, float deg)
+void stepper_set_position_deg(Stepper_t *motor, float deg)
 {
-    if (!AXIS_OK(axis) || s_cfg[axis].steps_per_deg == 0.0f) { return; }
-    int32_t usteps = (int32_t)(deg * usteps_per_deg(axis));
-    s_pos_usteps[axis] = usteps;
-    if (AXIS_OK_SPI(axis))
+    if (!MOTOR_OK(motor) || motor->cfg.steps_per_deg == 0.0f) { return; }
+    int32_t usteps = (int32_t)(deg * usteps_per_deg(motor));
+    motor->pos_usteps = usteps;
+    if (MOTOR_OK_SPI(motor))
     {
-        STEPPER_WriteReg(s_hal[axis], TMC5160_REG_XACTUAL, (uint32_t)usteps, NULL);
-        STEPPER_WriteReg(s_hal[axis], TMC5160_REG_XTARGET, (uint32_t)usteps, NULL);
+        STEPPER_WriteReg(motor->hal, TMC5160_REG_XACTUAL, (uint32_t)usteps, NULL);
+        STEPPER_WriteReg(motor->hal, TMC5160_REG_XTARGET, (uint32_t)usteps, NULL);
     }
 }
 
@@ -452,57 +429,57 @@ void stepper_set_position_deg(uint8_t axis, float deg)
  * Fires home callback (one-shot) or stall callback on stall.
  * No-op for step/dir-only drivers.
  * --------------------------------------------------------------- */
-void stepper_poll(uint8_t axis, TMC5160_MotorStatus_t *out)
+void stepper_poll(Stepper_t *motor, TMC5160_MotorStatus_t *out)
 {
-    if (!AXIS_OK_SPI(axis)) { return; }
+    if (!MOTOR_OK_SPI(motor)) { return; }
 
     TMC5160_Status_t spi_st;
     uint32_t drv;
 
-    s_status[axis].xactual = (int32_t)STEPPER_ReadReg(s_hal[axis], TMC5160_REG_XACTUAL,   &spi_st);
-    s_status[axis].vactual = (int32_t)STEPPER_ReadReg(s_hal[axis], TMC5160_REG_VACTUAL,   NULL);
-    drv                    =           STEPPER_ReadReg(s_hal[axis], TMC5160_REG_DRVSTATUS, NULL);
+    motor->status.xactual = (int32_t)STEPPER_ReadReg(motor->hal, TMC5160_REG_XACTUAL,   &spi_st);
+    motor->status.vactual = (int32_t)STEPPER_ReadReg(motor->hal, TMC5160_REG_VACTUAL,   NULL);
+    drv                   =           STEPPER_ReadReg(motor->hal, TMC5160_REG_DRVSTATUS, NULL);
 
-    s_status[axis].spi_status    = spi_st;
-    s_status[axis].sg_result     = (uint16_t)(drv & TMC5160_DRVSTATUS_SG_RESULT_MASK);
-    s_status[axis].stalled       = (drv & TMC5160_DRVSTATUS_STALLGUARD) != 0U;
-    s_status[axis].standstill    = (drv & TMC5160_DRVSTATUS_STST)       != 0U;
-    s_status[axis].overtemp      = (drv & TMC5160_DRVSTATUS_OT)         != 0U;
-    s_status[axis].overtemp_warn = (drv & TMC5160_DRVSTATUS_OTPW)       != 0U;
-    s_status[axis].open_load_a   = (drv & TMC5160_DRVSTATUS_OLA)        != 0U;
-    s_status[axis].open_load_b   = (drv & TMC5160_DRVSTATUS_OLB)        != 0U;
-    s_status[axis].pos_reached   = spi_st.pos_reached;
-    s_status[axis].vel_reached   = spi_st.vel_reached;
+    motor->status.spi_status    = spi_st;
+    motor->status.sg_result     = (uint16_t)(drv & TMC5160_DRVSTATUS_SG_RESULT_MASK);
+    motor->status.stalled       = (drv & TMC5160_DRVSTATUS_STALLGUARD) != 0U;
+    motor->status.standstill    = (drv & TMC5160_DRVSTATUS_STST)       != 0U;
+    motor->status.overtemp      = (drv & TMC5160_DRVSTATUS_OT)         != 0U;
+    motor->status.overtemp_warn = (drv & TMC5160_DRVSTATUS_OTPW)       != 0U;
+    motor->status.open_load_a   = (drv & TMC5160_DRVSTATUS_OLA)        != 0U;
+    motor->status.open_load_b   = (drv & TMC5160_DRVSTATUS_OLB)        != 0U;
+    motor->status.pos_reached   = spi_st.pos_reached;
+    motor->status.vel_reached   = spi_st.vel_reached;
 
     /* Keep software counter in sync with ramp mode XACTUAL */
-    if (s_cfg[axis].drive_mode == STEPPER_MODE_RAMP)
+    if (motor->cfg.drive_mode == STEPPER_MODE_RAMP)
     {
-        s_pos_usteps[axis] = s_status[axis].xactual;
+        motor->pos_usteps = motor->status.xactual;
     }
 
-    if (s_status[axis].stalled)
+    if (motor->status.stalled)
     {
-        if (s_home_cb[axis] != NULL)
+        if (motor->home_cb != NULL)
         {
             /* Non-blocking home complete: stop, zero, fire callback (one-shot) */
-            TMC5160_HomeCallback_t cb = s_home_cb[axis];
-            s_home_cb[axis] = NULL;                  /* clear before calling     */
-            stepper_stop(axis);
-            s_hal[axis]->delay_us(50000U);           /* 50 ms debounce via HAL   */
-            stepper_set_position_zero(axis);
-            cb(axis);
+            TMC5160_HomeCallback_t cb = motor->home_cb;
+            motor->home_cb = NULL;                   /* clear before calling     */
+            stepper_stop(motor);
+            motor->hal->delay_us(50000U);            /* 50 ms debounce via HAL   */
+            stepper_set_position_zero(motor);
+            cb();
         }
-        else if (s_stall_cb[axis] != NULL)
+        else if (motor->stall_cb != NULL)
         {
-            s_stall_cb[axis]();
+            motor->stall_cb();
         }
     }
 
-    if (out != NULL) { *out = s_status[axis]; }
+    if (out != NULL) { *out = motor->status; }
 }
 
-bool stepper_is_stalled(uint8_t axis)  { return AXIS_OK(axis) && s_status[axis].stalled;     }
-bool stepper_pos_reached(uint8_t axis) { return AXIS_OK(axis) && s_status[axis].pos_reached; }
+bool stepper_is_stalled(Stepper_t *motor)  { return MOTOR_OK(motor) && motor->status.stalled;     }
+bool stepper_pos_reached(Stepper_t *motor) { return MOTOR_OK(motor) && motor->status.pos_reached; }
 
 /* ---------------------------------------------------------------
  * Step/Dir software position counter update
@@ -510,35 +487,35 @@ bool stepper_pos_reached(uint8_t axis) { return AXIS_OK(axis) && s_status[axis].
  * Call this from the HAL step ISR (or from move_steps() after
  * each pulse) to keep s_pos_usteps accurate in step/dir mode.
  * --------------------------------------------------------------- */
-void stepper_step_tick(uint8_t axis, bool forward)
+void stepper_step_tick(Stepper_t *motor, bool forward)
 {
-    if (!AXIS_OK(axis)) { return; }
-    if (forward) { s_pos_usteps[axis]++; }
-    else         { s_pos_usteps[axis]--; }
+    if (!MOTOR_OK(motor)) { return; }
+    if (forward) { motor->pos_usteps++; }
+    else         { motor->pos_usteps--; }
 }
 
 /* ---------------------------------------------------------------
  * Runtime current control
  * --------------------------------------------------------------- */
-void stepper_set_irun(uint8_t axis, uint8_t irun)
+void stepper_set_irun(Stepper_t *motor, uint8_t irun)
 {
-    if (!AXIS_OK_SPI(axis)) { return; }
-    s_cfg[axis].irun = irun & 0x1FU;
-    STEPPER_WriteReg(s_hal[axis], TMC5160_REG_IHOLD_IRUN,
-                     build_ihold_irun(s_cfg[axis].ihold,
-                                      s_cfg[axis].irun,
-                                      s_cfg[axis].iholddelay),
+    if (!MOTOR_OK_SPI(motor)) { return; }
+    motor->cfg.irun = irun & 0x1FU;
+    STEPPER_WriteReg(motor->hal, TMC5160_REG_IHOLD_IRUN,
+                     build_ihold_irun(motor->cfg.ihold,
+                                      motor->cfg.irun,
+                                      motor->cfg.iholddelay),
                      NULL);
 }
 
-void stepper_set_ihold(uint8_t axis, uint8_t ihold)
+void stepper_set_ihold(Stepper_t *motor, uint8_t ihold)
 {
-    if (!AXIS_OK_SPI(axis)) { return; }
-    s_cfg[axis].ihold = ihold & 0x1FU;
-    STEPPER_WriteReg(s_hal[axis], TMC5160_REG_IHOLD_IRUN,
-                     build_ihold_irun(s_cfg[axis].ihold,
-                                      s_cfg[axis].irun,
-                                      s_cfg[axis].iholddelay),
+    if (!MOTOR_OK_SPI(motor)) { return; }
+    motor->cfg.ihold = ihold & 0x1FU;
+    STEPPER_WriteReg(motor->hal, TMC5160_REG_IHOLD_IRUN,
+                     build_ihold_irun(motor->cfg.ihold,
+                                      motor->cfg.irun,
+                                      motor->cfg.iholddelay),
                      NULL);
 }
 
@@ -547,18 +524,18 @@ void stepper_set_ihold(uint8_t axis, uint8_t ihold)
  * threshold: -64 to +63 (lower = more sensitive)
  * filter_en: true = filtered (more stable, slower response)
  * --------------------------------------------------------------- */
-void stepper_stallguard_config(uint8_t axis, int8_t threshold, bool filter_en)
+void stepper_stallguard_config(Stepper_t *motor, int8_t threshold, bool filter_en)
 {
-    if (!AXIS_OK_SPI(axis)) { return; }
+    if (!MOTOR_OK_SPI(motor)) { return; }
 
-    uint32_t coolconf = STEPPER_ReadReg(s_hal[axis], TMC5160_REG_COOLCONF, NULL);
+    uint32_t coolconf = STEPPER_ReadReg(motor->hal, TMC5160_REG_COOLCONF, NULL);
 
     coolconf &= ~((0x7FUL << TMC5160_COOLCONF_SGT_SHIFT) | TMC5160_COOLCONF_SFILT);
     coolconf |= ((uint32_t)((int32_t)threshold & 0x7F) << TMC5160_COOLCONF_SGT_SHIFT);
 
     if (filter_en) { coolconf |= TMC5160_COOLCONF_SFILT; }
 
-    STEPPER_WriteReg(s_hal[axis], TMC5160_REG_COOLCONF, coolconf, NULL);
+    STEPPER_WriteReg(motor->hal, TMC5160_REG_COOLCONF, coolconf, NULL);
 }
 
 /* ---------------------------------------------------------------
@@ -569,16 +546,16 @@ void stepper_stallguard_config(uint8_t axis, int8_t threshold, bool filter_en)
  * sedn:   current decrement speed (0-3 → per 32/8/2/1 SG samples)
  * seimin: minimum current floor (false=½ IRUN, true=¼ IRUN)
  * --------------------------------------------------------------- */
-void stepper_coolstep_config(uint8_t axis,
+void stepper_coolstep_config(Stepper_t *motor,
                              uint8_t semin,
                              uint8_t semax,
                              uint8_t seup,
                              uint8_t sedn,
                              bool    seimin)
 {
-    if (!AXIS_OK_SPI(axis)) { return; }
+    if (!MOTOR_OK_SPI(motor)) { return; }
 
-    uint32_t coolconf = STEPPER_ReadReg(s_hal[axis], TMC5160_REG_COOLCONF, NULL);
+    uint32_t coolconf = STEPPER_ReadReg(motor->hal, TMC5160_REG_COOLCONF, NULL);
 
     coolconf &= ~((0x0FUL << TMC5160_COOLCONF_SEMIN_SHIFT) |
                   (0x03UL << TMC5160_COOLCONF_SEUP_SHIFT)  |
@@ -592,12 +569,12 @@ void stepper_coolstep_config(uint8_t axis,
     coolconf |= ((uint32_t)(sedn  & 0x03U) << TMC5160_COOLCONF_SEDN_SHIFT);
     if (seimin) { coolconf |= TMC5160_COOLCONF_SEIMIN; }
 
-    STEPPER_WriteReg(s_hal[axis], TMC5160_REG_COOLCONF, coolconf, NULL);
+    STEPPER_WriteReg(motor->hal, TMC5160_REG_COOLCONF, coolconf, NULL);
 }
 
-void stepper_set_stall_callback(uint8_t axis, TMC5160_StallCallback_t cb)
+void stepper_set_stall_callback(Stepper_t *motor, TMC5160_StallCallback_t cb)
 {
-    if (axis < STEPPER_MAX_AXES) { s_stall_cb[axis] = cb; }
+    if (motor != NULL) { motor->stall_cb = cb; }
 }
 
 /* ---------------------------------------------------------------
@@ -612,41 +589,41 @@ void stepper_set_stall_callback(uint8_t axis, TMC5160_StallCallback_t cb)
  *
  * StallGuard requires SPI — no-op for step/dir-only drivers.
  * --------------------------------------------------------------- */
-void stepper_home(uint8_t axis, bool reverse, uint32_t creep_vmax,
+void stepper_home(Stepper_t *motor, bool reverse, uint32_t creep_vmax,
                   TMC5160_HomeCallback_t on_complete)
 {
-    if (!AXIS_OK_SPI(axis)) { return; }
+    if (!MOTOR_OK_SPI(motor)) { return; }
 
     if (on_complete != NULL)
     {
         /* Non-blocking: register one-shot callback and start motion */
-        s_home_cb[axis] = on_complete;
-        stepper_run(axis, creep_vmax, reverse);
+        motor->home_cb = on_complete;
+        stepper_run(motor, creep_vmax, reverse);
     }
     else
     {
         /* Blocking: poll until stall, then stop and zero */
         TMC5160_MotorStatus_t st;
-        stepper_run(axis, creep_vmax, reverse);
-        do { stepper_poll(axis, &st); } while (!st.stalled);
-        stepper_stop(axis);
-        s_hal[axis]->delay_us(50000U);   /* 50 ms debounce via HAL */
-        stepper_set_position_zero(axis);
+        stepper_run(motor, creep_vmax, reverse);
+        do { stepper_poll(motor, &st); } while (!st.stalled);
+        stepper_stop(motor);
+        motor->hal->delay_us(50000U);   /* 50 ms debounce via HAL */
+        stepper_set_position_zero(motor);
     }
 }
 
 /* ---------------------------------------------------------------
  * Raw register access — tuning / debug / encoder setup
  * --------------------------------------------------------------- */
-void stepper_write_reg(uint8_t axis, uint8_t addr, uint32_t data)
+void stepper_write_reg(Stepper_t *motor, uint8_t addr, uint32_t data)
 {
-    if (AXIS_OK_SPI(axis)) { STEPPER_WriteReg(s_hal[axis], addr, data, NULL); }
+    if (MOTOR_OK_SPI(motor)) { STEPPER_WriteReg(motor->hal, addr, data, NULL); }
 }
 
-uint32_t stepper_read_reg(uint8_t axis, uint8_t addr)
+uint32_t stepper_read_reg(Stepper_t *motor, uint8_t addr)
 {
-    if (!AXIS_OK_SPI(axis)) { return 0U; }
-    return STEPPER_ReadReg(s_hal[axis], addr, NULL);
+    if (!MOTOR_OK_SPI(motor)) { return 0U; }
+    return STEPPER_ReadReg(motor->hal, addr, NULL);
 }
 
 /* ---------------------------------------------------------------
@@ -655,9 +632,9 @@ uint32_t stepper_read_reg(uint8_t axis, uint8_t addr)
  * Maps every field of TMC5160_SwMode_t directly to the SW_MODE
  * register bits.  Call after stepper_init_axis().
  * --------------------------------------------------------------- */
-void stepper_sw_mode_config(uint8_t axis, const TMC5160_SwMode_t *sw)
+void stepper_sw_mode_config(Stepper_t *motor, const TMC5160_SwMode_t *sw)
 {
-    if (!AXIS_OK_SPI(axis) || sw == NULL) { return; }
+    if (!MOTOR_OK_SPI(motor) || sw == NULL) { return; }
 
     uint32_t reg = 0U;
     if (sw->stop_l_enable)    { reg |= TMC5160_SWMODE_STOP_L_ENABLE; }
@@ -673,21 +650,21 @@ void stepper_sw_mode_config(uint8_t axis, const TMC5160_SwMode_t *sw)
     if (sw->sg_stop)          { reg |= TMC5160_SWMODE_SG_STOP; }
     if (sw->en_softstop)      { reg |= TMC5160_SWMODE_EN_SOFTSTOP; }
 
-    STEPPER_WriteReg(s_hal[axis], TMC5160_REG_SW_MODE, reg, NULL);
+    STEPPER_WriteReg(motor->hal, TMC5160_REG_SW_MODE, reg, NULL);
 }
 
 /* Return latched position captured on last stop event */
-int32_t stepper_get_xlatch(uint8_t axis)
+int32_t stepper_get_xlatch(Stepper_t *motor)
 {
-    if (!AXIS_OK_SPI(axis)) { return 0; }
-    return (int32_t)STEPPER_ReadReg(s_hal[axis], TMC5160_REG_XLATCH, NULL);
+    if (!MOTOR_OK_SPI(motor)) { return 0; }
+    return (int32_t)STEPPER_ReadReg(motor->hal, TMC5160_REG_XLATCH, NULL);
 }
 
 /* Return raw RAMP_STAT register — test against TMC5160_RAMPSTAT_* masks */
-uint32_t stepper_get_ramp_stat(uint8_t axis)
+uint32_t stepper_get_ramp_stat(Stepper_t *motor)
 {
-    if (!AXIS_OK_SPI(axis)) { return 0U; }
-    return STEPPER_ReadReg(s_hal[axis], TMC5160_REG_RAMP_STAT, NULL);
+    if (!MOTOR_OK_SPI(motor)) { return 0U; }
+    return STEPPER_ReadReg(motor->hal, TMC5160_REG_RAMP_STAT, NULL);
 }
 
 /* ---------------------------------------------------------------
@@ -699,23 +676,23 @@ uint32_t stepper_get_ramp_stat(uint8_t axis)
  *
  * All three are TSTEP-based (inverse velocity) — larger value = lower speed.
  * --------------------------------------------------------------- */
-void stepper_set_velocity_bands(uint8_t axis,
+void stepper_set_velocity_bands(Stepper_t *motor,
                                 uint32_t tpwmthrs,
                                 uint32_t tcoolthrs,
                                 uint32_t thigh)
 {
-    if (!AXIS_OK_SPI(axis)) { return; }
-    STEPPER_WriteReg(s_hal[axis], TMC5160_REG_TPWMTHRS,  tpwmthrs,  NULL);
-    STEPPER_WriteReg(s_hal[axis], TMC5160_REG_TCOOLTHRS, tcoolthrs, NULL);
-    STEPPER_WriteReg(s_hal[axis], TMC5160_REG_THIGH,     thigh,     NULL);
+    if (!MOTOR_OK_SPI(motor)) { return; }
+    STEPPER_WriteReg(motor->hal, TMC5160_REG_TPWMTHRS,  tpwmthrs,  NULL);
+    STEPPER_WriteReg(motor->hal, TMC5160_REG_TCOOLTHRS, tcoolthrs, NULL);
+    STEPPER_WriteReg(motor->hal, TMC5160_REG_THIGH,     thigh,     NULL);
 }
 
 /* ---------------------------------------------------------------
  * Position compare — fires a pulse on DIAG1 when XACTUAL == pos
  * Requires GCONF.DIAG1_POSCOMP to be set (not set by default).
  * --------------------------------------------------------------- */
-void stepper_set_position_compare(uint8_t axis, int32_t pos)
+void stepper_set_position_compare(Stepper_t *motor, int32_t pos)
 {
-    if (!AXIS_OK_SPI(axis)) { return; }
-    STEPPER_WriteReg(s_hal[axis], TMC5160_REG_X_COMPARE, (uint32_t)pos, NULL);
+    if (!MOTOR_OK_SPI(motor)) { return; }
+    STEPPER_WriteReg(motor->hal, TMC5160_REG_X_COMPARE, (uint32_t)pos, NULL);
 }

@@ -66,6 +66,7 @@
 // Section: System Interrupt Vector declarations
 // *****************************************************************************
 // *****************************************************************************
+void TIMER_2_Handler (void);
 void SPI2_RX_Handler (void);
 void SPI2_TX_Handler (void);
 void UART2_FAULT_Handler (void);
@@ -78,6 +79,11 @@ void UART2_TX_Handler (void);
 // Section: System Interrupt Vector definitions
 // *****************************************************************************
 // *****************************************************************************
+void __attribute__((used)) __ISR(_TIMER_2_VECTOR, ipl1SRS) TIMER_2_Handler (void)
+{
+    TIMER_2_InterruptHandler();
+}
+
 void __attribute__((used)) __ISR(_SPI2_RX_VECTOR, ipl5SRS) SPI2_RX_Handler (void)
 {
     SPI2_RX_InterruptHandler();
