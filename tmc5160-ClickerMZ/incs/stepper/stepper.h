@@ -18,6 +18,14 @@
  * Enumerations
  * ============================================================ */
 
+/* ============================================================
+ * Engineering unit system
+ * ============================================================ */
+typedef enum {
+    STEPPER_UNITS_MM   = 0,  /* millimetres (default) */
+    STEPPER_UNITS_INCH = 1,  /* inches                */
+} TMC5160_Units_t;
+
 /* How motion commands are executed */
 typedef enum {
     STEPPER_MODE_RAMP    = 0,  /* TMC5160 internal ramp generator (SPI only) */
@@ -26,9 +34,11 @@ typedef enum {
 
 /* Chopper / current control mode */
 typedef enum {
-    STEPPER_CHOP_STEALTHCHOP  = 0,  /* Silent sine-wave, low speed               */
-    STEPPER_CHOP_SPREADCYCLE  = 1,  /* High-accuracy chopper, high speed         */
-    STEPPER_CHOP_AUTO         = 2,  /* Chip auto-switches on TPWMTHRS/TCOOLTHRS  */
+    STEPPER_CHOP_STEALTHCHOP  = 0,  /* StealthChop2 only — silent PWM, low speed                   */
+    STEPPER_CHOP_SPREADCYCLE  = 1,  /* SpreadCycle only — high-accuracy constant off-time           */
+    STEPPER_CHOP_AUTO         = 2,  /* StealthChop → SpreadCycle auto on TPWMTHRS / TCOOLTHRS       */
+    STEPPER_CHOP_DCSTEP       = 3,  /* SpreadCycle + DCStep loss-free above THIGH / VDCMIN          */
+    STEPPER_CHOP_AUTO_DCSTEP  = 4,  /* Full range: StealthChop → SpreadCycle → DCStep               */
 } TMC5160_ChopperMode_t;
 
 /* Coil state at standstill (PWMCONF.FREEWHEEL) */
@@ -77,6 +87,16 @@ typedef struct {
     bool                  invert_dir;      /* Board-level direction invert (GCONF.SHAFT)   */
     bool                  encoder_enable;  /* Enable TMC5160 ABN encoder interface         */
     uint32_t              enc_const;       /* ENC_CONST scaling factor (0 = skip write)    */
+
+    /* Rotation axis — set non-zero for angular axes (nozzle, rotary table) */
+    float                 steps_per_deg;   /* full steps per degree; 0 = linear axis only  */
+
+    /* Unit system for public API — does not affect internal ustep calculations */
+    TMC5160_Units_t       units;           /* STEPPER_UNITS_MM (default) or INCH           */
+
+    /* Standstill power-down delay (TPOWERDOWN).                                */
+    /* Each count = 2^18 / fclk_hz seconds. 10 ≈ 218 ms at 12 MHz.             */
+    uint8_t               tpowerdown;      /* 0 = use default (10); max 255                */
 
     /* Standstill freewheel / braking (PWMCONF.FREEWHEEL) */
     TMC5160_Freewheel_t   freewheel;       /* coil state at standstill; default = NORMAL   */
@@ -156,6 +176,7 @@ typedef void (*TMC5160_HomeCallback_t)(uint8_t axis);
 bool stepper_init_axis(uint8_t axis, const TMC5160_Config_t *cfg, const Stepper_HAL_t *hal);
 void stepper_enable(uint8_t axis);
 void stepper_disable(uint8_t axis);
+void stepper_stop_all(void);           /* emergency stop — all initialised axes */
 
 /* ============================================================
  * Ramp configuration  (TMC5160 ramp mode only)
@@ -173,9 +194,31 @@ void stepper_set_position_zero(uint8_t axis);                /* zero XACTUAL    
 
 /* ============================================================
  * Motion — engineering units (requires steps_per_mm set)
+ * All functions respect the axis unit system (mm or inch).
  * ============================================================ */
-void     stepper_move_mm(uint8_t axis, float mm);
+void     stepper_move_mm(uint8_t axis, float mm);             /* relative in mm           */
+void     stepper_move_to_mm(uint8_t axis, float mm);          /* absolute in mm           */
 void     stepper_run_mmps(uint8_t axis, float mm_per_sec, bool reverse);
+void     stepper_move_inch(uint8_t axis, float inch);         /* relative in inches       */
+void     stepper_move_to_inch(uint8_t axis, float inch);      /* absolute in inches       */
+void     stepper_run_ips(uint8_t axis, float inch_per_sec, bool reverse);
+float    stepper_get_position_mm(uint8_t axis);               /* current position in mm   */
+float    stepper_get_position_inch(uint8_t axis);             /* current position in inch */
+void     stepper_set_position_mm(uint8_t axis, float mm);     /* set known offset, not 0  */
+
+/* ============================================================
+ * Rotation axis  (requires steps_per_deg > 0 in config)
+ * ============================================================ */
+void     stepper_move_deg(uint8_t axis, float deg);           /* relative in degrees      */
+void     stepper_move_to_deg(uint8_t axis, float deg);        /* absolute in degrees      */
+void     stepper_run_dps(uint8_t axis, float deg_per_sec, bool reverse);
+float    stepper_get_position_deg(uint8_t axis);              /* current position in deg  */
+void     stepper_set_position_deg(uint8_t axis, float deg);   /* set known angular offset */
+uint32_t stepper_dps_to_vmax(uint8_t axis, float deg_per_sec);
+
+/* ============================================================
+ * Unit conversions (internal — also useful for callers)
+ * ============================================================ */
 int32_t  stepper_pos_to_usteps(uint8_t axis, float mm);
 float    stepper_usteps_to_mm(uint8_t axis, int32_t usteps);
 uint32_t stepper_mmps_to_vmax(uint8_t axis, float mm_per_sec);
@@ -188,10 +231,31 @@ bool stepper_is_stalled(uint8_t axis);
 bool stepper_pos_reached(uint8_t axis);
 
 /* ============================================================
+ * Step/Dir software position counter
+ *
+ * Call stepper_step_tick() from your step ISR or after every
+ * pulse in move_steps() so the position counter stays accurate
+ * in STEPPER_MODE_STEPDIR.  stepper_get_position_mm/deg() and
+ * stepper_poll() all use this counter in step/dir mode.
+ * ============================================================ */
+void stepper_step_tick(uint8_t axis, bool forward);
+
+/* ============================================================
+ * Runtime current control
+ * ============================================================ */
+void stepper_set_irun(uint8_t axis, uint8_t irun);    /* 0-31, updates IHOLD_IRUN immediately */
+void stepper_set_ihold(uint8_t axis, uint8_t ihold);  /* 0-31, updates IHOLD_IRUN immediately */
+
+/* ============================================================
  * StallGuard / CoolStep  (TMC5160 SPI only)
  * ============================================================ */
 void stepper_stallguard_config(uint8_t axis, int8_t threshold, bool filter_en);
-void stepper_coolstep_config(uint8_t axis, uint8_t semin, uint8_t semax);
+void stepper_coolstep_config(uint8_t axis,
+                             uint8_t semin,   /* 1-15 lower SG bound; 0 = disable  */
+                             uint8_t semax,   /* 0-15 upper SG band width          */
+                             uint8_t seup,    /* 0-3  current increment step       */
+                             uint8_t sedn,    /* 0-3  current decrement speed      */
+                             bool    seimin); /* false=½ IRUN floor, true=¼ IRUN   */
 void stepper_set_stall_callback(uint8_t axis, TMC5160_StallCallback_t cb);
 
 /* ============================================================

@@ -2,6 +2,8 @@
 #include "stepper.h"
 #include "stepper_reg.h"
 
+#define MM_PER_INCH  25.4f
+
 /* ---------------------------------------------------------------
  * Module state — one slot per axis
  * --------------------------------------------------------------- */
@@ -12,6 +14,7 @@ static TMC5160_HomeCallback_t  s_home_cb[STEPPER_MAX_AXES];
 static TMC5160_MotorStatus_t   s_status[STEPPER_MAX_AXES];
 static const Stepper_HAL_t    *s_hal[STEPPER_MAX_AXES];
 static bool                    s_initialised[STEPPER_MAX_AXES];
+static int32_t                 s_pos_usteps[STEPPER_MAX_AXES]; /* software counter (step/dir mode) */
 
 /* ---------------------------------------------------------------
  * Guard helpers
@@ -87,26 +90,40 @@ static uint32_t build_chopconf(const TMC5160_Config_t *cfg, bool stealthchop_en)
  *
  *   VMAX_reg = v [usteps/s] × 2^23 / fCLK
  * --------------------------------------------------------------- */
+static float usteps_per_mm(uint8_t axis)
+{
+    return s_cfg[axis].steps_per_mm * (float)s_cfg[axis].microsteps;
+}
+
+static float usteps_per_deg(uint8_t axis)
+{
+    return s_cfg[axis].steps_per_deg * (float)s_cfg[axis].microsteps;
+}
+
 uint32_t stepper_mmps_to_vmax(uint8_t axis, float mm_per_sec)
 {
     if (!AXIS_OK(axis)) { return 0U; }
-    float usteps_per_mm = s_cfg[axis].steps_per_mm * (float)s_cfg[axis].microsteps;
-    float v_usteps      = mm_per_sec * usteps_per_mm;
-    return (uint32_t)(v_usteps * 8388608.0f / (float)s_cfg[axis].fclk_hz);
+    float v = mm_per_sec * usteps_per_mm(axis);
+    return (uint32_t)(v * 8388608.0f / (float)s_cfg[axis].fclk_hz);
+}
+
+uint32_t stepper_dps_to_vmax(uint8_t axis, float deg_per_sec)
+{
+    if (!AXIS_OK(axis) || s_cfg[axis].steps_per_deg == 0.0f) { return 0U; }
+    float v = deg_per_sec * usteps_per_deg(axis);
+    return (uint32_t)(v * 8388608.0f / (float)s_cfg[axis].fclk_hz);
 }
 
 int32_t stepper_pos_to_usteps(uint8_t axis, float mm)
 {
     if (!AXIS_OK(axis)) { return 0; }
-    float usteps_per_mm = s_cfg[axis].steps_per_mm * (float)s_cfg[axis].microsteps;
-    return (int32_t)(mm * usteps_per_mm);
+    return (int32_t)(mm * usteps_per_mm(axis));
 }
 
 float stepper_usteps_to_mm(uint8_t axis, int32_t usteps)
 {
     if (!AXIS_OK(axis)) { return 0.0f; }
-    float usteps_per_mm = s_cfg[axis].steps_per_mm * (float)s_cfg[axis].microsteps;
-    return (float)usteps / usteps_per_mm;
+    return (float)usteps / usteps_per_mm(axis);
 }
 
 /* ---------------------------------------------------------------
@@ -121,6 +138,7 @@ bool stepper_init_axis(uint8_t axis, const TMC5160_Config_t *cfg, const Stepper_
     s_stall_cb[axis]    = NULL;
     s_home_cb[axis]     = NULL;
     s_initialised[axis] = true;
+    s_pos_usteps[axis]  = 0;
 
     stepper_disable(axis);   /* keep driver off during register setup */
 
@@ -144,7 +162,8 @@ bool stepper_init_axis(uint8_t axis, const TMC5160_Config_t *cfg, const Stepper_
             gconf |= TMC5160_GCONF_SHAFT;
         }
         if (cfg->chopper_mode == STEPPER_CHOP_STEALTHCHOP ||
-            cfg->chopper_mode == STEPPER_CHOP_AUTO)
+            cfg->chopper_mode == STEPPER_CHOP_AUTO         ||
+            cfg->chopper_mode == STEPPER_CHOP_AUTO_DCSTEP)
         {
             gconf |= TMC5160_GCONF_EN_PWM_MODE;
         }
@@ -159,17 +178,23 @@ bool stepper_init_axis(uint8_t axis, const TMC5160_Config_t *cfg, const Stepper_
                          build_ihold_irun(cfg->ihold, cfg->irun, cfg->iholddelay),
                          NULL);
 
-        /* TPOWERDOWN: ~160 ms */
-        STEPPER_WriteReg(hal, TMC5160_REG_TPOWERDOWN, 10U, NULL);
+        /* TPOWERDOWN: coil hold delay after standstill */
+        STEPPER_WriteReg(hal, TMC5160_REG_TPOWERDOWN,
+                         (cfg->tpowerdown > 0U) ? (uint32_t)cfg->tpowerdown : 10U,
+                         NULL);
 
         /* Chopper */
-        bool stealthchop_en = (cfg->chopper_mode != STEPPER_CHOP_SPREADCYCLE);
+        bool stealthchop_en = (cfg->chopper_mode == STEPPER_CHOP_STEALTHCHOP ||
+                               cfg->chopper_mode == STEPPER_CHOP_AUTO         ||
+                               cfg->chopper_mode == STEPPER_CHOP_AUTO_DCSTEP);
         STEPPER_WriteReg(hal, TMC5160_REG_CHOPCONF,
                          build_chopconf(cfg, stealthchop_en),
                          NULL);
 
         /* StealthChop auto-tuning */
-        if (cfg->chopper_mode != STEPPER_CHOP_SPREADCYCLE)
+        if (cfg->chopper_mode == STEPPER_CHOP_STEALTHCHOP ||
+            cfg->chopper_mode == STEPPER_CHOP_AUTO         ||
+            cfg->chopper_mode == STEPPER_CHOP_AUTO_DCSTEP)
         {
             /* PWM_GRAD auto, PWM_OFS auto, pwm_autoscale, pwm_autograd, freq=2 */
             uint32_t pwmconf = (1UL << 18U) | (1UL << 19U) | (12UL << 28U);
@@ -191,7 +216,8 @@ bool stepper_init_axis(uint8_t axis, const TMC5160_Config_t *cfg, const Stepper_
         }
 
         /* Auto chopper switching thresholds */
-        if (cfg->chopper_mode == STEPPER_CHOP_AUTO)
+        if (cfg->chopper_mode == STEPPER_CHOP_AUTO ||
+            cfg->chopper_mode == STEPPER_CHOP_AUTO_DCSTEP)
         {
             STEPPER_WriteReg(hal, TMC5160_REG_TPWMTHRS,  500U,  NULL);
             STEPPER_WriteReg(hal, TMC5160_REG_TCOOLTHRS, 2000U, NULL);
@@ -240,6 +266,17 @@ void stepper_enable(uint8_t axis)
 void stepper_disable(uint8_t axis)
 {
     if (AXIS_OK(axis)) { s_hal[axis]->en_deassert(); }
+}
+
+void stepper_stop_all(void)
+{
+    for (uint8_t i = 0U; i < STEPPER_MAX_AXES; i++)
+    {
+        if (s_initialised[i])
+        {
+            stepper_stop(i);
+        }
+    }
 }
 
 /* ---------------------------------------------------------------
@@ -294,22 +331,118 @@ void stepper_stop(uint8_t axis)
 
 void stepper_set_position_zero(uint8_t axis)
 {
-    if (!AXIS_OK_SPI(axis)) { return; }
-    STEPPER_WriteReg(s_hal[axis], TMC5160_REG_XACTUAL, 0U, NULL);
-    STEPPER_WriteReg(s_hal[axis], TMC5160_REG_XTARGET, 0U, NULL);
+    if (AXIS_OK_SPI(axis))
+    {
+        STEPPER_WriteReg(s_hal[axis], TMC5160_REG_XACTUAL, 0U, NULL);
+        STEPPER_WriteReg(s_hal[axis], TMC5160_REG_XTARGET, 0U, NULL);
+    }
+    if (AXIS_OK(axis)) { s_pos_usteps[axis] = 0; }
 }
 
 /* ---------------------------------------------------------------
- * Engineering unit wrappers
+ * Engineering unit wrappers — linear (mm / inch)
  * --------------------------------------------------------------- */
 void stepper_move_mm(uint8_t axis, float mm)
 {
     stepper_move_relative(axis, stepper_pos_to_usteps(axis, mm));
 }
 
+void stepper_move_to_mm(uint8_t axis, float mm)
+{
+    if (!AXIS_OK(axis)) { return; }
+    stepper_move_to(axis, (int32_t)(mm * usteps_per_mm(axis)));
+}
+
 void stepper_run_mmps(uint8_t axis, float mm_per_sec, bool reverse)
 {
     stepper_run(axis, stepper_mmps_to_vmax(axis, mm_per_sec), reverse);
+}
+
+void stepper_move_inch(uint8_t axis, float inch)
+{
+    stepper_move_mm(axis, inch * MM_PER_INCH);
+}
+
+void stepper_move_to_inch(uint8_t axis, float inch)
+{
+    stepper_move_to_mm(axis, inch * MM_PER_INCH);
+}
+
+void stepper_run_ips(uint8_t axis, float inch_per_sec, bool reverse)
+{
+    stepper_run_mmps(axis, inch_per_sec * MM_PER_INCH, reverse);
+}
+
+float stepper_get_position_mm(uint8_t axis)
+{
+    if (!AXIS_OK(axis)) { return 0.0f; }
+    int32_t pos = (s_cfg[axis].drive_mode == STEPPER_MODE_STEPDIR)
+                ? s_pos_usteps[axis]
+                : s_status[axis].xactual;
+    float mm = (float)pos / usteps_per_mm(axis);
+    return (s_cfg[axis].units == STEPPER_UNITS_INCH) ? mm / MM_PER_INCH : mm;
+}
+
+float stepper_get_position_inch(uint8_t axis)
+{
+    if (!AXIS_OK(axis)) { return 0.0f; }
+    int32_t pos = (s_cfg[axis].drive_mode == STEPPER_MODE_STEPDIR)
+                ? s_pos_usteps[axis]
+                : s_status[axis].xactual;
+    return (float)pos / usteps_per_mm(axis) / MM_PER_INCH;
+}
+
+void stepper_set_position_mm(uint8_t axis, float mm)
+{
+    if (!AXIS_OK(axis)) { return; }
+    int32_t usteps = (int32_t)(mm * usteps_per_mm(axis));
+    s_pos_usteps[axis] = usteps;
+    if (AXIS_OK_SPI(axis))
+    {
+        STEPPER_WriteReg(s_hal[axis], TMC5160_REG_XACTUAL, (uint32_t)usteps, NULL);
+        STEPPER_WriteReg(s_hal[axis], TMC5160_REG_XTARGET, (uint32_t)usteps, NULL);
+    }
+}
+
+/* ---------------------------------------------------------------
+ * Rotation axis wrappers (steps_per_deg must be > 0)
+ * --------------------------------------------------------------- */
+void stepper_move_deg(uint8_t axis, float deg)
+{
+    if (!AXIS_OK(axis) || s_cfg[axis].steps_per_deg == 0.0f) { return; }
+    stepper_move_relative(axis, (int32_t)(deg * usteps_per_deg(axis)));
+}
+
+void stepper_move_to_deg(uint8_t axis, float deg)
+{
+    if (!AXIS_OK(axis) || s_cfg[axis].steps_per_deg == 0.0f) { return; }
+    stepper_move_to(axis, (int32_t)(deg * usteps_per_deg(axis)));
+}
+
+void stepper_run_dps(uint8_t axis, float deg_per_sec, bool reverse)
+{
+    stepper_run(axis, stepper_dps_to_vmax(axis, deg_per_sec), reverse);
+}
+
+float stepper_get_position_deg(uint8_t axis)
+{
+    if (!AXIS_OK(axis) || s_cfg[axis].steps_per_deg == 0.0f) { return 0.0f; }
+    int32_t pos = (s_cfg[axis].drive_mode == STEPPER_MODE_STEPDIR)
+                ? s_pos_usteps[axis]
+                : s_status[axis].xactual;
+    return (float)pos / usteps_per_deg(axis);
+}
+
+void stepper_set_position_deg(uint8_t axis, float deg)
+{
+    if (!AXIS_OK(axis) || s_cfg[axis].steps_per_deg == 0.0f) { return; }
+    int32_t usteps = (int32_t)(deg * usteps_per_deg(axis));
+    s_pos_usteps[axis] = usteps;
+    if (AXIS_OK_SPI(axis))
+    {
+        STEPPER_WriteReg(s_hal[axis], TMC5160_REG_XACTUAL, (uint32_t)usteps, NULL);
+        STEPPER_WriteReg(s_hal[axis], TMC5160_REG_XTARGET, (uint32_t)usteps, NULL);
+    }
 }
 
 /* ---------------------------------------------------------------
@@ -341,6 +474,12 @@ void stepper_poll(uint8_t axis, TMC5160_MotorStatus_t *out)
     s_status[axis].pos_reached   = spi_st.pos_reached;
     s_status[axis].vel_reached   = spi_st.vel_reached;
 
+    /* Keep software counter in sync with ramp mode XACTUAL */
+    if (s_cfg[axis].drive_mode == STEPPER_MODE_RAMP)
+    {
+        s_pos_usteps[axis] = s_status[axis].xactual;
+    }
+
     if (s_status[axis].stalled)
     {
         if (s_home_cb[axis] != NULL)
@@ -366,6 +505,44 @@ bool stepper_is_stalled(uint8_t axis)  { return AXIS_OK(axis) && s_status[axis].
 bool stepper_pos_reached(uint8_t axis) { return AXIS_OK(axis) && s_status[axis].pos_reached; }
 
 /* ---------------------------------------------------------------
+ * Step/Dir software position counter update
+ *
+ * Call this from the HAL step ISR (or from move_steps() after
+ * each pulse) to keep s_pos_usteps accurate in step/dir mode.
+ * --------------------------------------------------------------- */
+void stepper_step_tick(uint8_t axis, bool forward)
+{
+    if (!AXIS_OK(axis)) { return; }
+    if (forward) { s_pos_usteps[axis]++; }
+    else         { s_pos_usteps[axis]--; }
+}
+
+/* ---------------------------------------------------------------
+ * Runtime current control
+ * --------------------------------------------------------------- */
+void stepper_set_irun(uint8_t axis, uint8_t irun)
+{
+    if (!AXIS_OK_SPI(axis)) { return; }
+    s_cfg[axis].irun = irun & 0x1FU;
+    STEPPER_WriteReg(s_hal[axis], TMC5160_REG_IHOLD_IRUN,
+                     build_ihold_irun(s_cfg[axis].ihold,
+                                      s_cfg[axis].irun,
+                                      s_cfg[axis].iholddelay),
+                     NULL);
+}
+
+void stepper_set_ihold(uint8_t axis, uint8_t ihold)
+{
+    if (!AXIS_OK_SPI(axis)) { return; }
+    s_cfg[axis].ihold = ihold & 0x1FU;
+    STEPPER_WriteReg(s_hal[axis], TMC5160_REG_IHOLD_IRUN,
+                     build_ihold_irun(s_cfg[axis].ihold,
+                                      s_cfg[axis].irun,
+                                      s_cfg[axis].iholddelay),
+                     NULL);
+}
+
+/* ---------------------------------------------------------------
  * StallGuard configuration
  * threshold: -64 to +63 (lower = more sensitive)
  * filter_en: true = filtered (more stable, slower response)
@@ -386,19 +563,34 @@ void stepper_stallguard_config(uint8_t axis, int8_t threshold, bool filter_en)
 
 /* ---------------------------------------------------------------
  * CoolStep configuration
- * semin: lower SG threshold for current increase (1-15, 0=disable)
- * semax: upper SG threshold band width (0-15)
+ * semin:  lower SG threshold for current increase (1-15, 0=disable)
+ * semax:  upper SG threshold band width (0-15)
+ * seup:   current increment step size (0-3 → 1/2/4/8)
+ * sedn:   current decrement speed (0-3 → per 32/8/2/1 SG samples)
+ * seimin: minimum current floor (false=½ IRUN, true=¼ IRUN)
  * --------------------------------------------------------------- */
-void stepper_coolstep_config(uint8_t axis, uint8_t semin, uint8_t semax)
+void stepper_coolstep_config(uint8_t axis,
+                             uint8_t semin,
+                             uint8_t semax,
+                             uint8_t seup,
+                             uint8_t sedn,
+                             bool    seimin)
 {
     if (!AXIS_OK_SPI(axis)) { return; }
 
     uint32_t coolconf = STEPPER_ReadReg(s_hal[axis], TMC5160_REG_COOLCONF, NULL);
 
     coolconf &= ~((0x0FUL << TMC5160_COOLCONF_SEMIN_SHIFT) |
-                  (0x0FUL << TMC5160_COOLCONF_SEMAX_SHIFT));
+                  (0x03UL << TMC5160_COOLCONF_SEUP_SHIFT)  |
+                  (0x0FUL << TMC5160_COOLCONF_SEMAX_SHIFT) |
+                  (0x03UL << TMC5160_COOLCONF_SEDN_SHIFT)  |
+                  TMC5160_COOLCONF_SEIMIN);
+
     coolconf |= ((uint32_t)(semin & 0x0FU) << TMC5160_COOLCONF_SEMIN_SHIFT);
     coolconf |= ((uint32_t)(semax & 0x0FU) << TMC5160_COOLCONF_SEMAX_SHIFT);
+    coolconf |= ((uint32_t)(seup  & 0x03U) << TMC5160_COOLCONF_SEUP_SHIFT);
+    coolconf |= ((uint32_t)(sedn  & 0x03U) << TMC5160_COOLCONF_SEDN_SHIFT);
+    if (seimin) { coolconf |= TMC5160_COOLCONF_SEIMIN; }
 
     STEPPER_WriteReg(s_hal[axis], TMC5160_REG_COOLCONF, coolconf, NULL);
 }

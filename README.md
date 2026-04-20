@@ -1,11 +1,14 @@
 # tmc5160-ClickerMZ
 
-Hardware-abstracted stepper motor library for the **TMC5160** targeting the
+Hardware-abstracted stepper motor library for the **TMC5160/DRV8825** targeting the
 **MIKROE ClickerMZ (PIC32MZ EF)** board, built with **Microchip XC32 v5**.
 
 The library compiles to a static archive (`libstepper.a`) and has no MCU
 headers of its own — all peripherals are wired in through a `Stepper_HAL_t`
 function-pointer struct, making it straightforward to reuse on any other MCU.
+
+For the full API reference, configuration guide, and feature documentation see
+**[USING_TMC5160_LIB.md](USING_TMC5160_LIB.md)**.
 
 ---
 
@@ -32,16 +35,59 @@ tmc5160-ClickerMZ/          ← workspace / build root
 
 ---
 
+## Target Hardware
+
+| Item | Detail |
+|------|--------|
+| MCU | PIC32MZ1024EFH064 @ 200 MHz |
+| Board | MikroE Clicker 2 for PIC32MZ |
+| Driver | BigTreeTech TMC5160 PRO (Click module) |
+| Rsense | 75 mΩ (BTT PRO — not the standard 110 mΩ) |
+| TMC5160 clock | 12 MHz internal oscillator |
+| SPI | SPI2 (Harmony plib) |
+| UART | UART2 @ 115200 8N1 for debug output |
+| Bootloader | MIKROE USB-UART bootloader (`USE_MIKROE_BOOTLOADER`) |
+
+### Pin Mapping (MikroBUS socket 1)
+
+| Signal | PIC32MZ pin | Direction | Notes |
+|--------|-------------|-----------|-------|
+| SPI2 SCK | RG6 | Out | Dedicated SPI pin |
+| SPI2 MOSI (SDO2) | RG8 | Out | PPS RPG8R=6 |
+| SPI2 MISO (SDI2) | RG7 | In | PPS SDI2R=1 |
+| CS (soft) | RG9 | Out | Idle HIGH; asserted LOW for full 5-byte frame |
+| UART2 TX | RB2 | Out | PPS RPB2R=2 |
+| UART2 RX | RB0 | In | PPS U2RXR=5 |
+| EN | RE4 | Out | HIGH = driver disabled (safe default) |
+| DIR | RB5 | Out | Direction |
+| STEP | RB3 | Out | Step pulse (STEPDIR mode only) |
+| DIAG0 | RB12 | In | StallGuard / fault output from TMC5160 |
+| DIAG1 | RB13 | In | Second diagnostic output |
+
+> **MSSEN is disabled.** Hardware SS would deassert between bytes, breaking the
+> required 5-byte atomic SPI frame. CS is driven manually on RG9.
+
+---
+
 ## Prerequisites
 
 | Tool | Version tested |
 |------|---------------|
+| MPLAB X IDE | v6.25 |
 | Microchip XC32 | v5.00 |
-| MPLABX DFP (PIC32MZ-EF) | 1.4.168 |
-| GNU Make (via XC Project Importer) | — |
+| PIC32MZ-EF DFP | 1.4.168 |
+| VS Code extension | `davidcoetzee.xc-project-importer` 2.5.51 |
+| GNU Make | via XC Project Importer |
 
 Add `xc32/v5.00/bin` to your `PATH` or let the VS Code task / XC Project
 Importer extension resolve it automatically.
+
+Build paths are set for the above versions. Override on the command line:
+
+```powershell
+make COMPILER_LOCATION="C:/Program Files/Microchip/xc32/v5.00/bin" `
+     DFP="C:/Program Files/Microchip/MPLABX/v6.25/packs/Microchip/PIC32MZ-EF_DFP/1.4.168"
+```
 
 ---
 
@@ -60,6 +106,14 @@ make lib
 # Clean build artefacts (objs/, other/)
 make clean
 ```
+
+### VS Code Tasks (`Ctrl+Shift+B`)
+
+| Task | Command |
+|------|---------|
+| Build XC32 Project | `make` |
+| Clean Build Artifacts | `make clean` |
+| Flash Device | `make flash` |
 
 ---
 
@@ -86,6 +140,38 @@ LDFLAGS += -L/path/to/tmc5160-ClickerMZ/tmc5160-ClickerMZ/libs -lstepper
 
 > `stepper_reg.h` is only needed for direct register-level access. Normal
 > applications do not need to include it.
+
+---
+
+## Getting Started
+
+### 1. Build
+
+```powershell
+cd tmc5160-ClickerMZ
+make
+# Output: bins/tmc5160-ClickerMZ.hex
+```
+
+### 2. Flash
+
+Flash `bins/tmc5160-ClickerMZ.hex` via the MikroE USB bootloader or a PICkit.
+
+### 3. Verify over UART
+
+Connect a USB-UART adapter to **RB2 (TX)** and **RB0 (RX)**, open a terminal at **115200 8N1**.
+
+Expected output on first boot:
+
+```
+--- TMC5160 Test Start ---
+IOIN = 0x30xxxxxx  VERSION = 0x30 [OK]
+stepper_init [OK]
+Move started to XTARGET=1000
+Done. pos=1000  sg=xxx  stall=0  ot=0  [pos_reached]
+```
+
+If `VERSION` reads `0x00` or `0xFF`, SPI wiring is wrong — scope SCK / MOSI / CS (RG9).
 
 ---
 
@@ -157,136 +243,40 @@ static const Stepper_HAL_t hal = {
 
 ---
 
-## API Reference
+## Library Feature Summary
 
-### Initialisation
+| Feature | Detail |
+|---------|--------|
+| **Ramp mode** | TMC5160 internal trapezoidal / S-curve generator (RAMPMODE=0) |
+| **Velocity mode** | Constant velocity (RAMPMODE=1/2) |
+| **Step/Dir mode** | MCU-generated STEP pulses, DIR pin for direction |
+| **Chopper modes** | StealthChop, SpreadCycle, AUTO, DCStep, AUTO+DCStep |
+| **StallGuard** | Configurable SGT threshold; stall callback function pointer |
+| **CoolStep** | Full SEMIN/SEMAX/SEUP/SEDN/SEIMIN control |
+| **Homing** | Sensorless blocking or non-blocking via StallGuard |
+| **Hardware stops** | Full SW_MODE register — latching, polarity, soft stop |
+| **Encoder** | ABN encoder interface enable + ENC_CONST scaling |
+| **DCStep** | VDCMIN + THIGH configuration for loss-free high-speed |
+| **Linear units — mm** | `stepper_move_mm()`, `stepper_move_to_mm()`, `stepper_run_mmps()` |
+| **Linear units — inch** | `stepper_move_inch()`, `stepper_move_to_inch()`, `stepper_run_ips()` |
+| **Rotation axis** | `stepper_move_deg()`, `stepper_move_to_deg()`, `stepper_run_dps()`, `stepper_get_position_deg()` |
+| **Position getters/setters** | `stepper_get_position_mm/inch/deg()`, `stepper_set_position_mm/deg()` |
+| **Software position counter** | `stepper_step_tick()` keeps position accurate in step/dir mode |
+| **Runtime current control** | `stepper_set_irun()` / `stepper_set_ihold()` — no re-init required |
+| **Emergency stop** | `stepper_stop_all()` — stops every initialised axis at once |
+| **Configurable TPOWERDOWN** | `cfg.tpowerdown` — coil hold-current delay, 0 = chip default |
+| **Multi-axis** | Up to `STEPPER_MAX_AXES` (default 4) independent axes |
 
-```c
-/*
- * Initialise one axis (0 … STEPPER_MAX_AXES-1).
- * Returns false if axis index is out of range.
- * Safe to call again to re-configure.
- */
-bool stepper_init_axis(uint8_t axis,
-                       const TMC5160_Config_t *cfg,
-                       const Stepper_HAL_t    *hal);
-
-void stepper_enable(uint8_t axis);   /* Assert ENN — motor holds */
-void stepper_disable(uint8_t axis);  /* Release ENN — motor free */
-```
-
-`STEPPER_MAX_AXES` defaults to **4**. Override at compile time:
-```makefile
-CFLAGS += -DSTEPPER_MAX_AXES=2
-```
-
-### Motor Configuration
-
-```c
-TMC5160_Config_t cfg = {
-    .drive_mode     = STEPPER_MODE_STEPDIR,    /* or STEPPER_MODE_RAMP     */
-    .chopper_mode   = STEPPER_CHOP_SPREADCYCLE,/* or STEALTHCHOP / AUTO    */
-    .microsteps     = 16U,                     /* 1–256                     */
-    .irun           = 20U,                     /* 0–31  (31 = 100% Imax)   */
-    .ihold          = 8U,
-    .iholddelay     = 6U,
-    .steps_per_mm   = 80.0f,                   /* full steps / mm           */
-    .fclk_hz        = 12000000U,               /* 12 MHz internal osc       */
-    .rsense_mohm    = 75U,                     /* BTT PRO = 75 mΩ           */
-    .invert_dir     = false,
-    .encoder_enable = false,
-};
-```
-
-### Ramp Configuration (TMC5160 ramp mode)
-
-```c
-TMC5160_RampConfig_t ramp = {
-    .VSTART = 0U,
-    .A1     = 1000U,
-    .V1     = 50000U,
-    .AMAX   = 5000U,
-    .VMAX   = 200000U,
-    .DMAX   = 5000U,
-    .D1     = 1000U,
-    .VSTOP  = 10U,    /* must be >= 10 */
-};
-stepper_set_ramp(0U, &ramp);
-```
-
-### Motion
-
-```c
-/* Absolute / relative moves (microsteps) */
-stepper_move_to(axis, position);
-stepper_move_relative(axis, delta);
-
-/* Velocity mode */
-stepper_run(axis, vmax, reverse);
-stepper_stop(axis);
-
-/* Engineering-unit helpers (requires steps_per_mm) */
-stepper_move_mm(axis, mm);
-stepper_run_mmps(axis, mm_per_sec, reverse);
-uint32_t v = stepper_mmps_to_vmax(axis, mm_per_sec);
-
-/* Reset XACTUAL to zero */
-stepper_set_position_zero(axis);
-```
-
-### Status Polling
-
-```c
-TMC5160_MotorStatus_t st;
-stepper_poll(axis, &st);   /* updates st from SPI registers */
-
-st.xactual;     /* current position (microsteps) */
-st.vactual;     /* current velocity (raw)        */
-st.sg_result;   /* StallGuard result  0–1023      */
-st.stalled;     /* stall detected                */
-st.standstill;
-st.pos_reached;
-st.overtemp;
-```
-
-### StallGuard & Homing
-
-```c
-/* Configure threshold (-64 … +63; lower = more sensitive) */
-stepper_stallguard_config(axis, threshold, filter_en);
-
-/* Optional: CoolStep automatic current reduction */
-stepper_coolstep_config(axis, semin, semax);
-
-/* Sensorless homing — blocking */
-stepper_home(axis, reverse, creep_vmax, NULL);
-
-/* Sensorless homing — non-blocking; fires cb from stepper_poll() */
-void on_homed(uint8_t axis) { /* axis is now zeroed */ }
-stepper_home(axis, reverse, creep_vmax, on_homed);
-/* pump from main loop: */
-while (!done) { stepper_poll(axis, &st); }
-```
+For the complete API, configuration field reference, and usage examples see
+**[USING_TMC5160_LIB.md](USING_TMC5160_LIB.md)**.
 
 ---
 
-## SPI Verification
+## Roadmap
 
-Read `IOIN` (register `0x04`) immediately after init. Bits 31:24 contain the
-chip version — `0x30` for TMC5160. Any other value indicates a wiring fault.
-
-```c
-uint32_t ioin    = stepper_read_reg(0U, 0x04U);
-uint8_t  version = (uint8_t)(ioin >> 24U);
-/* version == 0x30 → SPI OK */
-```
-
----
-
-## Target Hardware
-
-- **MCU**: PIC32MZ1024EFH064 on MIKROE ClickerMZ
-- **Driver**: BTT TMC5160 PRO (Rsense = 75 mΩ)
-- **SPI**: SPI2 (Harmony plib)
-- **UART**: UART2 @ 115200 8N1 for debug output
-- **Bootloader**: MIKROE USB-UART bootloader (`USE_MIKROE_BOOTLOADER`)
+- [ ] Hardware verification — flash and confirm IOIN=0x30
+- [ ] StallGuard / SGT calibration on the bench
+- [ ] CoolStep SEMIN/SEMAX tuning
+- [ ] STEPDIR mode via PIC32MZ Output Compare (OC4=RB3)
+- [ ] DIAG0/DIAG1 interrupt wiring to EVIC
+- [ ] Multi-axis coordinated moves
