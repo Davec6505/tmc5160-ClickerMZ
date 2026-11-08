@@ -105,8 +105,6 @@ static const Stepper_HAL_t hal = {
 typedef struct {
     Stepper_t   motor;
     uint32_t    phase_acc;    /* DDS phase accumulator              */
-    uint32_t    tuning_word;  /* written by motion planner          */
-    bool        forward;      /* current direction                  */
     bool        step_pending; /* step pin is HIGH — clear next tick */
 } Axis_t;
 
@@ -115,82 +113,9 @@ static Axis_t x_axis;
 /* Current StallGuard threshold — adjusted at runtime via SW1/SW2 */
 static int8_t s_sgt = 20;
 
-/* Forward declaration — defined after do_home() */
-static void set_velocity_steps_per_sec(Axis_t *ax, float v, bool fwd);
 
-/* ---------------------------------------------------------------
- * Sensorless homing
- *
- * 1. Lower SGT to homing sensitivity (more sensitive).
- * 2. Run reverse at creep speed.
- * 3. Stall fires → stop, zero position.
- * 4. Restore SGT and return.
- *
- * Call from main loop only — blocking, uses CORETIMER delays.
- * --------------------------------------------------------------- */
-#define HOME_SGT        -10     /* more sensitive than run SGT — tune as needed */
-#define HOME_USTEPS_SEC 8000.0f /* slow creep: ~37 RPM at 64 usteps             */
-#define HOME_TIMEOUT_MS 5000U   /* abort if no stall within this time           */
 
-static void do_home(void)
-{
-    debug_print("Homing: start\r\n");
-    debug_flush();
 
-    /* 1. Save run SGT, apply homing SGT */
-    int8_t run_sgt = s_sgt;
-    stepper_stallguard_config(&x_axis.motor, (int8_t)HOME_SGT, false);
-
-    /* 2. Run reverse at creep speed */
-    set_velocity_steps_per_sec(&x_axis, HOME_USTEPS_SEC, false);
-
-    /* Grace period — let motor start before SG is sampled */
-    CORETIMER_DelayMs(300U);
-
-    /* 3. Poll for stall with timeout */
-    uint32_t elapsed = 0U;
-    bool     homed   = false;
-    while (elapsed < HOME_TIMEOUT_MS)
-    {
-        TMC5160_MotorStatus_t st;
-        stepper_poll(&x_axis.motor, &st);
-        if (st.stalled)
-        {
-            homed = true;
-            break;
-        }
-        CORETIMER_DelayMs(10U);
-        elapsed += 10U;
-    }
-
-    /* 4. Stop, zero position */
-    set_velocity_steps_per_sec(&x_axis, 0.0f, true);
-    x_axis.motor.pos_usteps = 0;
-
-    if (homed)
-    {
-        debug_print("Homing: done — position zeroed\r\n");
-    }
-    else
-    {
-        debug_print("Homing: TIMEOUT — no stall detected\r\n");
-    }
-    debug_flush();
-
-    /* 5. Restore run SGT */
-    s_sgt = run_sgt;
-    stepper_stallguard_config(&x_axis.motor, s_sgt, false);
-
-    /* Grace period before resuming normal motion */
-    CORETIMER_DelayMs(500U);
-}
-
-/* Set step rate. Call before or after TMR2_Start(); safe from main loop. */
-static void set_velocity_steps_per_sec(Axis_t *ax, float v, bool fwd)
-{
-    ax->forward     = fwd;
-    ax->tuning_word = (uint32_t)(v * (4294967296.0f / 100000.0f)); /* 10 µs tick */
-}
 
 /* ---------------------------------------------------------------
  * TMR2 callback — 10 µs tick (100 kHz)
@@ -207,17 +132,19 @@ static void timer_isr(uint32_t status, uintptr_t context)
         x_axis.step_pending = false;
     }
 
-    /* DDS: 32-bit accumulator overflow = one step event */
+    /* S-curve ramp tick: returns DDS tuning word and current direction */
+    bool fwd;
     uint32_t prev = x_axis.phase_acc;
-    x_axis.phase_acc += x_axis.tuning_word;
+    x_axis.phase_acc += stepper_swramp_tick(&x_axis.motor, &fwd);
 
+    /* 32-bit overflow = one microstep */
     if (x_axis.phase_acc < prev)
     {
-        if (x_axis.forward) { x_axis.motor.hal->dir_set();   }
-        else                { x_axis.motor.hal->dir_clear(); }
+        if (fwd) { x_axis.motor.hal->dir_set();   }
+        else     { x_axis.motor.hal->dir_clear(); }
         x_axis.motor.hal->step_set();
         x_axis.step_pending = true;
-        stepper_step_tick(&x_axis.motor, x_axis.forward);
+        stepper_step_tick(&x_axis.motor, fwd);
     }
 }
 
@@ -263,6 +190,15 @@ stepper_set_velocity_bands(&x_axis.motor, 0U, 500000U, 0U);
 /* NOTE: SG_STOP (SW_MODE bit 10) is NOT set — it only gates the internal ramp
  * generator and has no effect in STEP/DIR mode. Stall detection is software-only. */
 
+    /* S-curve ramp: 100 kHz tick, 80 000 usteps/s ceiling,
+     * 200 000 usteps/s² acceleration, 2 000 000 usteps/s³ jerk.
+     * Tune accel/jerk to taste: more jerk → sharper S, less jerk → smoother. */
+    stepper_swramp_config(&x_axis.motor,
+                          100000.0f,    /* tick_hz   — must match TMR2 period */
+                          80000.0f,     /* v_max_ups                          */
+                          200000.0f,    /* accel_ups2                         */
+                          2000000.0f);  /* jerk_ups3 (0 = trapezoid)          */
+
 
 
     debug_print("stepper_init [OK]\r\n");
@@ -292,9 +228,7 @@ stepper_set_velocity_bands(&x_axis.motor, 0U, 500000U, 0U);
     }
 
     /* Configure motion, enable driver, then start DDS timer */
-    /* 64 usteps: DDS ceiling = 100000 usteps/sec = ~469 RPM.
-     * 80000 usteps/sec = ~375 RPM — good speed with 10% headroom. */
-    set_velocity_steps_per_sec(&x_axis, 40000.0f, true);
+    stepper_swramp_set_velocity(&x_axis.motor, 40000.0f);  /* +fwd, will ramp up */
     stepper_enable(&x_axis.motor);
 
     TMR2_CallbackRegister(timer_isr, (uintptr_t)0);
@@ -308,13 +242,11 @@ stepper_set_velocity_bands(&x_axis.motor, 0U, 500000U, 0U);
     debug_flush();
 
     /* Main loop: SPI status + SW1/SW2 SGT tuning.
-     * SW1 (RB8)        = SGT+1 (less sensitive) OR resume after stall.
-     * SW2 (RB11) short = SGT-1 (more sensitive).
-     * SW2 (RB11) long  = trigger sensorless home (hold ~1s). */
-    bool     sw1_prev   = true;
-    bool     sw2_prev   = true;
-    bool     stalled    = false;
-    uint32_t sw2_held   = 0U;   /* counts 200ms ticks SW2 is held */
+     * Not stalled: SW1 = SGT+1 (less sensitive), SW2 = SGT-1 (more sensitive).
+     * Stalled:     SW1 = resume motor (ramp back up). */
+    bool sw1_prev  = true;
+    bool sw2_prev  = true;
+    bool stalled   = false;
     while (true)
     {
         bool sw1 = (SW1_Get() != 0U);
@@ -322,22 +254,20 @@ stepper_set_velocity_bands(&x_axis.motor, 0U, 500000U, 0U);
 
         if (stalled)
         {
-            /* Waiting for SW1 press to resume */
+            /* SW1 falling edge — resume */
             if (!sw1 && sw1_prev)
             {
                 stalled = false;
-                LED2_Clear();
-                stepper_read_reg(&x_axis.motor, 0x35U); /* read RAMPSTAT clears event flags */
-                set_velocity_steps_per_sec(&x_axis, 40000.0f, true);
+                LED1_Clear();
+                stepper_swramp_set_velocity(&x_axis.motor, 40000.0f);
                 debug_print("Resumed [SW1] — grace period...\r\n");
                 debug_flush();
-                /* Same grace period as startup: motor needs to reach speed before
-                 * SG is valid — without this it immediately re-stalls from standstill. */
-                CORETIMER_DelayMs(500U);
+                CORETIMER_DelayMs(500U);  /* wait for speed before SG is valid */
             }
         }
         else
         {
+            /* SW1: SGT+1 */
             if (!sw1 && sw1_prev && s_sgt < 63)
             {
                 s_sgt++;
@@ -347,62 +277,40 @@ stepper_set_velocity_bands(&x_axis.motor, 0U, 500000U, 0U);
                 debug_flush();
             }
 
-            /* SW2: count held ticks; on release decide short vs long press */
-            if (!sw2) { sw2_held++; }
-            if (sw2 && !sw2_prev)
+            /* SW2: SGT-1 */
+            if (!sw2 && sw2_prev && s_sgt > -64)
             {
-                if (sw2_held >= 5U) /* 5 × 200ms = 1s hold → home */
-                {
-                    set_velocity_steps_per_sec(&x_axis, 0.0f, true);
-                    do_home();
-                    set_velocity_steps_per_sec(&x_axis, 40000.0f, true);
-                    debug_print("Resuming normal run\r\n");
-                    debug_flush();
-                }
-                else if (sw2_held > 0U && s_sgt > -64) /* short press → SGT-1 */
-                {
-                    s_sgt--;
-                    stepper_stallguard_config(&x_axis.motor, s_sgt, false);
-                    snprintf(uart_buf, sizeof(uart_buf), "SGT -> %d  [SW2-]\r\n", (int)s_sgt);
-                    debug_print(uart_buf);
-                    debug_flush();
-                }
-                sw2_held = 0U;
+                s_sgt--;
+                stepper_stallguard_config(&x_axis.motor, s_sgt, false);
+                snprintf(uart_buf, sizeof(uart_buf), "SGT -> %d  [SW2-]\r\n", (int)s_sgt);
+                debug_print(uart_buf);
+                debug_flush();
+            }
+
+            /* DIAG0 active low = stall */
+            if (!DIAG0_Get())
+            {
+                stalled = true;
+                LED1_Set();
+                stepper_swramp_set_velocity(&x_axis.motor, 0.0f);
+                snprintf(uart_buf, sizeof(uart_buf),
+                         "*** STALL! SGT=%d — press SW1 to resume ***\r\n", (int)s_sgt);
+                debug_print(uart_buf);
+                debug_flush();
             }
         }
+
         sw1_prev = sw1;
         sw2_prev = sw2;
 
         TMC5160_MotorStatus_t st;
         stepper_poll(&x_axis.motor, &st);
 
-        if (!stalled && st.stalled)
-        {
-            stalled = true;
-            set_velocity_steps_per_sec(&x_axis, 0.0f, true); /* stop DDS */
-            snprintf(uart_buf, sizeof(uart_buf),
-                     "*** STALL detected! SGT=%d sg=%u — press SW1 to resume ***\r\n",
-                     (int)s_sgt, st.sg_result);
-            debug_print(uart_buf);
-            debug_flush();
-            LED2_Set();
-        }
-        else if (stalled && !st.stalled)
-        {
-            /* chip cleared SG_STOP latch automatically (e.g. shaft released) — keep DDS stopped */
-        }
-        else
-        {
-            LED2_Clear();
-            snprintf(uart_buf, sizeof(uart_buf),
-                     "SGT=%d  sg=%u  stall=%d  stst=%d\r\n",
-                     (int)s_sgt, st.sg_result, (int)st.stalled, (int)st.standstill);
-            debug_print(uart_buf);
-            debug_flush();
-        }
-
-        LED1_Toggle();
-        CORETIMER_DelayMs(200U);
+        snprintf(uart_buf, sizeof(uart_buf),
+                 "SGT=%d  sg=%u  stall=%d  stst=%d\r\n",
+                 (int)s_sgt, st.sg_result, (int)st.stalled, (int)st.standstill);
+        debug_print(uart_buf);
+        debug_flush();
     }
 
     return EXIT_FAILURE;

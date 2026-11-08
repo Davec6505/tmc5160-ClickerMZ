@@ -696,3 +696,121 @@ void stepper_set_position_compare(Stepper_t *motor, int32_t pos)
     if (!MOTOR_OK_SPI(motor)) { return; }
     STEPPER_WriteReg(motor->hal, TMC5160_REG_X_COMPARE, (uint32_t)pos, NULL);
 }
+
+/* ---------------------------------------------------------------
+ * Software S-curve ramp  (STEP/DIR mode)
+ *
+ * stepper_swramp_config()
+ *   Set profile parameters once after stepper_init().
+ *   tick_hz    : timer ISR rate in Hz (e.g. 100000 for a 10 µs tick).
+ *   v_max_ups  : speed ceiling in microsteps/sec (positive).
+ *   accel_ups2 : acceleration magnitude in microsteps/sec².
+ *   jerk_ups3  : jerk limit in microsteps/sec³; 0 = trapezoid profile.
+ *
+ * stepper_swramp_set_velocity()
+ *   Command a new target speed. Signed: +fwd, -rev, 0 = stop.
+ *   Safe to call from the main loop while the ISR is running —
+ *   v_target is a single 32-bit write (atomic on PIC32MZ).
+ *
+ * stepper_swramp_tick()
+ *   Call from the timer ISR every tick.
+ *   Returns the DDS tuning word for the current tick and sets
+ *   *forward to the current direction.  Add the returned word to
+ *   the 32-bit DDS phase accumulator; an overflow = one step pulse.
+ * --------------------------------------------------------------- */
+void stepper_swramp_config(Stepper_t *motor,
+                           float tick_hz,
+                           float v_max_ups,
+                           float accel_ups2,
+                           float jerk_ups3)
+{
+    if (!MOTOR_OK(motor) || tick_hz <= 0.0f) { return; }
+
+    Stepper_SWRamp_t *r = &motor->sw_ramp;
+    r->v_max_ups  = v_max_ups;
+    r->accel_ups2 = accel_ups2;
+    r->jerk_ups3  = jerk_ups3;
+    r->dt         = 1.0f / tick_hz;
+    r->v_target   = 0.0f;
+    r->v_now      = 0.0f;
+    r->a_now      = 0.0f;
+}
+
+void stepper_swramp_set_velocity(Stepper_t *motor, float v_target_ups)
+{
+    if (!MOTOR_OK(motor)) { return; }
+
+    Stepper_SWRamp_t *r = &motor->sw_ramp;
+
+    /* Clamp to configured ceiling before storing */
+    if (v_target_ups >  r->v_max_ups) { v_target_ups =  r->v_max_ups; }
+    if (v_target_ups < -r->v_max_ups) { v_target_ups = -r->v_max_ups; }
+
+    r->v_target = v_target_ups;   /* 32-bit store — atomic on PIC32MZ */
+}
+
+uint32_t stepper_swramp_tick(Stepper_t *motor, bool *forward)
+{
+    Stepper_SWRamp_t *r = &motor->sw_ramp;
+
+    /* Snapshot v_target once (volatile read) */
+    float v_tgt = r->v_target;
+    float dt    = r->dt;
+
+    /* Desired acceleration: push v_now toward v_target */
+    float v_err = v_tgt - r->v_now;
+    float a_des;
+    if      (v_err > 0.0f) { a_des = +r->accel_ups2; }
+    else if (v_err < 0.0f) { a_des = -r->accel_ups2; }
+    else                   { a_des =  0.0f; }
+
+    if (r->jerk_ups3 > 0.0f)
+    {
+        /* S-curve: jerk-limit how fast acceleration may change */
+        float da_max = r->jerk_ups3 * dt;
+        float a_err  = a_des - r->a_now;
+        if      (a_err >  da_max) { r->a_now += da_max; }
+        else if (a_err < -da_max) { r->a_now -= da_max; }
+        else                      { r->a_now  = a_des;  }
+    }
+    else
+    {
+        /* Trapezoid: acceleration changes instantly */
+        r->a_now = a_des;
+    }
+
+    /* Integrate velocity */
+    float v_prev = r->v_now;
+    r->v_now += r->a_now * dt;
+
+    /* Clamp to ±v_max */
+    if      (r->v_now >  r->v_max_ups) { r->v_now =  r->v_max_ups; }
+    else if (r->v_now < -r->v_max_ups) { r->v_now = -r->v_max_ups; }
+
+    /* Snap: if v_now crossed or hit v_target this tick, lock it in.
+     * Prevents oscillation when decelerating to a stop or new speed. */
+    float v_err_new = v_tgt - r->v_now;
+    if ((v_err >= 0.0f && v_err_new <= 0.0f) ||
+        (v_err <= 0.0f && v_err_new >= 0.0f))
+    {
+        r->v_now = v_tgt;
+        r->a_now = 0.0f;
+    }
+    (void)v_prev;   /* suppress unused-variable warning */
+
+    /* Direction and speed magnitude */
+    float v_abs;
+    if (r->v_now >= 0.0f)
+    {
+        if (forward) { *forward = true; }
+        v_abs = r->v_now;
+    }
+    else
+    {
+        if (forward) { *forward = false; }
+        v_abs = -r->v_now;
+    }
+
+    /* DDS tuning word: v_abs / tick_hz * 2^32 = v_abs * dt * 2^32 */
+    return (uint32_t)(v_abs * dt * 4294967296.0f);
+}

@@ -159,6 +159,28 @@ typedef void (*TMC5160_StallCallback_t)(void);
 typedef void (*TMC5160_HomeCallback_t)(void);
 
 /* ============================================================
+ * Software S-curve ramp state  (STEP/DIR mode)
+ *
+ * Implements a jerk-limited trapezoidal velocity profile in software.
+ * The ISR calls stepper_swramp_tick() every tick; the library updates
+ * velocity internally and returns the DDS tuning word and direction.
+ *
+ * Set jerk_ups3 = 0 for a plain trapezoid (instant accel change).
+ * v_target is volatile — written from main, read from ISR.
+ * ============================================================ */
+typedef struct {
+    /* profile parameters — set once by stepper_swramp_config() */
+    float    v_max_ups;      /* speed ceiling (usteps/sec, positive)        */
+    float    accel_ups2;     /* acceleration magnitude  (usteps/sec²)       */
+    float    jerk_ups3;      /* jerk magnitude (usteps/sec³), 0 = trapezoid */
+    float    dt;             /* 1 / tick_hz — precomputed                   */
+    /* live state — updated each tick by stepper_swramp_tick() */
+    volatile float v_target; /* commanded velocity, signed (+fwd / -rev)    */
+    float    v_now;          /* current velocity, signed                    */
+    float    a_now;          /* current acceleration, signed                */
+} Stepper_SWRamp_t;
+
+/* ============================================================
  * Stepper handle
  *
  * The caller allocates one Stepper_t per axis (static, stack, or heap).
@@ -168,6 +190,7 @@ typedef void (*TMC5160_HomeCallback_t)(void);
 typedef struct {
     TMC5160_Config_t        cfg;
     TMC5160_RampConfig_t    ramp;
+    Stepper_SWRamp_t        sw_ramp;     /* software S-curve ramp (STEP/DIR) */
     TMC5160_MotorStatus_t   status;
     TMC5160_StallCallback_t stall_cb;
     TMC5160_HomeCallback_t  home_cb;
@@ -307,5 +330,23 @@ void stepper_set_velocity_bands(Stepper_t *motor,
  * Position compare output (X_COMPARE — fires pulse on DIAG1)
  * ============================================================ */
 void stepper_set_position_compare(Stepper_t *motor, int32_t pos);
+
+/* ============================================================
+ * Software S-curve ramp  (STEP/DIR mode)
+ *
+ * 1. Call stepper_swramp_config() once after stepper_init().
+ * 2. Call stepper_swramp_set_velocity() from the main loop to
+ *    command a signed target speed (+ = forward, - = reverse, 0 = stop).
+ * 3. Call stepper_swramp_tick() from the timer ISR every tick;
+ *    add the returned word to the DDS phase accumulator and use
+ *    *forward to set the DIR pin before each STEP pulse.
+ * ============================================================ */
+void     stepper_swramp_config(Stepper_t *motor,
+                               float tick_hz,
+                               float v_max_ups,
+                               float accel_ups2,
+                               float jerk_ups3);
+void     stepper_swramp_set_velocity(Stepper_t *motor, float v_target_ups);
+uint32_t stepper_swramp_tick(Stepper_t *motor, bool *forward);
 
 #endif /* STEPPER_H */
